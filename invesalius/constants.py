@@ -764,6 +764,8 @@ FIDUCIAL_MARKER_SHAPE = 11
 MARKER_SHAPE_BALL = 0
 MARKER_SHAPE_CROSS = 1
 
+MEASURE_TRANSPARENCY = 12
+
 
 # ------------ Logging options key------------
 FILE_LOGGING = 4

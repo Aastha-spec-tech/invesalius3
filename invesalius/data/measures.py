@@ -72,11 +72,18 @@ map_id_locations = {
 if sys.platform == "win32":
     MEASURE_LINE_COLOUR = (255, 0, 0, 255)
     MEASURE_TEXT_COLOUR = (0, 0, 0)
-    MEASURE_TEXTBOX_COLOUR = (255, 255, 165, 255)
+    # MEASURE_TEXTBOX_COLOUR = (255, 255, 165, 128)
 else:
     MEASURE_LINE_COLOUR = (255, 0, 0, 128)
     MEASURE_TEXT_COLOUR = (0, 0, 0)
-    MEASURE_TEXTBOX_COLOUR = (255, 255, 165, 255)
+    # MEASURE_TEXTBOX_COLOUR = (255, 255, 165, 255)
+
+
+def get_measure_textbox_colour():
+    session = ses.Session()
+    transparency = session.GetConfig("measure_transparency", 50)
+    alpha = int(255 * (1.0 - transparency / 100.0))
+    return (255, 255, 165, alpha)
 
 
 DEBUG_DENSITY = False
@@ -164,6 +171,7 @@ class MeasurementManager:
         Publisher.subscribe(self._show_annotation_dialog, "Show annotation dialog")
         Publisher.subscribe(self._update_point, "Update measurement point position")
         Publisher.subscribe(self._finalize_measurement, "Finalize measurement")
+        Publisher.subscribe(self._update_transparency, "Update measurement transparency")
         Publisher.subscribe(self.OnCloseProject, "Close project data")
 
     def _base_annotation_handler(self, evt):
@@ -589,6 +597,15 @@ class MeasurementManager:
             value=f"{m.value:.3f}",
         )
 
+    def _update_transparency(self, transparency):
+        new_colour = get_measure_textbox_colour()
+        for _m, mr in self.measures:
+            if hasattr(mr, "text_box") and mr.text_box is not None:
+                mr.text_box.box_colour = new_colour
+            if hasattr(mr, "update_transparency"):
+                mr.update_transparency(transparency)
+        Publisher.sendMessage("Redraw canvas")
+
     def OnCloseProject(self):
         self.measures.clean()
 
@@ -811,6 +828,9 @@ class LinearMeasure:
             representation = CirclePointRepresentation(colour)
         self.representation = representation
 
+        session = ses.Session()
+        self.transparency = session.GetConfig("measure_transparency", 50)
+
     def IsComplete(self):
         """
         Is this measure complete?
@@ -890,9 +910,15 @@ class LinearMeasure:
         a.DragableOn()
         a.GetPositionCoordinate().SetCoordinateSystemToWorld()
         a.GetPositionCoordinate().SetValue(x, y, z)
-        a.GetProperty().SetColor((0, 1, 0))
-        a.GetProperty().SetOpacity(0.75)
+
+        a.GetProperty().SetOpacity(1.0 - self.transparency / 100.0)
+
         self.text_actor = a
+
+    def update_transparency(self, transparency):
+        self.transparency = transparency
+        if hasattr(self, "text_actor"):
+            self.text_actor.GetProperty().SetOpacity(1.0 - self.transparency / 100.0)
 
     def draw_to_canvas(self, gc, canvas):
         """
@@ -923,8 +949,12 @@ class LinearMeasure:
                     (points[0][1] + points[1][1]) / 2.0,
                 ),
                 txt_colour=MEASURE_TEXT_COLOUR,
-                bg_colour=MEASURE_TEXTBOX_COLOUR,
+                bg_colour=self.get_textbox_colour(),
             )
+
+    def get_textbox_colour(self):
+        alpha = int(255 * (1.0 - self.transparency / 100.0))
+        return (255, 255, 165, alpha)
 
     def GetNumberOfPoints(self):
         return len(self.points)
@@ -1204,6 +1234,8 @@ class AnnotationMeasure:
         self.layer = 0
         self._text = ""
         self.is_finalized = False
+        session = ses.Session()
+        self.transparency = session.GetConfig("measure_transparency", 50)
         if not representation:
             representation = CirclePointRepresentation(colour)
         self.representation = representation
@@ -1326,7 +1358,7 @@ class AnnotationMeasure:
         a.GetPositionCoordinate().SetValue(tx, ty, tz)
 
         a.GetProperty().SetColor((0, 1, 0))
-        a.GetProperty().SetOpacity(0.75)
+        a.GetProperty().SetOpacity(1.0 - self.transparency / 100.0)
 
         self.text_actor = a
         self.text_source = textsource
@@ -1361,7 +1393,7 @@ class AnnotationMeasure:
                 wrapped,
                 (tx, ty),
                 txt_colour=MEASURE_TEXT_COLOUR,
-                bg_colour=MEASURE_TEXTBOX_COLOUR,
+                bg_colour=get_measure_textbox_colour(),
             )
 
     def GetNumberOfPoints(self):
@@ -1369,6 +1401,11 @@ class AnnotationMeasure:
 
     def GetValue(self):
         return self._text
+
+    def update_transparency(self, transparency):
+        self.transparency = transparency
+        if hasattr(self, "text_actor") and self.text_actor:
+            self.text_actor.GetProperty().SetOpacity(1.0 - self.transparency / 100.0)
 
     def SetVisibility(self, v):
         if self.point_actor1:
@@ -1410,6 +1447,9 @@ class AngularMeasure:
         self.point_actor3 = None
         self.line_actor = None
         self.text_actor = None
+
+        session = ses.Session()
+        self.transparency = session.GetConfig("measure_transparency", 50)
         self.layer = 0
         if not representation:
             representation = CirclePointRepresentation(colour)
@@ -1558,7 +1598,15 @@ class AngularMeasure:
         a.DragableOn()
         a.GetPositionCoordinate().SetCoordinateSystemToWorld()
         a.GetPositionCoordinate().SetValue(x, y, z)
+
+        a.GetProperty().SetOpacity(1.0 - self.transparency / 100.0)
+
         self.text_actor = a
+
+    def update_transparency(self, transparency):
+        self.transparency = transparency
+        if hasattr(self, "text_actor"):
+            self.text_actor.GetProperty().SetOpacity(1.0 - self.transparency / 100.0)
 
     def draw_to_canvas(self, gc, canvas):
         """
@@ -1595,8 +1643,12 @@ class AngularMeasure:
                     txt,
                     (points[1][0], points[1][1]),
                     txt_colour=MEASURE_TEXT_COLOUR,
-                    bg_colour=MEASURE_TEXTBOX_COLOUR,
+                    bg_colour=self.get_textbox_colour(),
                 )
+
+    def get_textbox_colour(self):
+        alpha = int(255 * (1.0 - self.transparency / 100.0))
+        return (255, 255, 165, alpha)
 
     def GetNumberOfPoints(self):
         return self.number_of_points
@@ -1774,7 +1826,7 @@ class CircleDensityMeasure(CanvasHandlerBase):
 
         if self.text_box is None:
             self.text_box = TextBox(
-                self, text, self.point1, MEASURE_TEXT_COLOUR, MEASURE_TEXTBOX_COLOUR
+                self, text, self.point1, MEASURE_TEXT_COLOUR, get_measure_textbox_colour()
             )
             self.text_box.layer = 2
             self.add_child(self.text_box)
@@ -2087,7 +2139,7 @@ class PolygonDensityMeasure(CanvasHandlerBase):
         p = [bounds[3], bounds[4], bounds[5]]
         if self.text_box is None:
             p[0] += 5
-            self.text_box = TextBox(self, "", p, MEASURE_TEXT_COLOUR, MEASURE_TEXTBOX_COLOUR)
+            self.text_box = TextBox(self, "", p, MEASURE_TEXT_COLOUR, get_measure_textbox_colour())
             self.text_box.layer = 2
             self.add_child(self.text_box)
 

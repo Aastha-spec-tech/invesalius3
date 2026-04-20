@@ -35,12 +35,22 @@ if TYPE_CHECKING:
     from invesalius.data.tracker_connection import TrackerConnection
 
 
+def _safe_call_after(func, *args, **kwargs):
+    """Call *func* on the main thread only if the wx.App still exists."""
+    if wx.GetApp() is not None:
+        wx.CallAfter(func, *args, **kwargs)
+
+
 class TrackerCoordinates:
     def __init__(self):
         self.coord: Optional[np.ndarray] = None
         self.marker_visibilities = [False, False, False]
         self.previous_marker_visibilities = self.marker_visibilities
         self.nav_status = False
+        self._pending_pose_update = False
+        self._pending_sensors_update = False
+        self._pose_update_data = None
+        self._sensor_update_data = None
         self.__bind_events()
 
     def __bind_events(self) -> None:
@@ -52,39 +62,45 @@ class TrackerCoordinates:
     def SetCoordinates(self, coord, marker_visibilities: List[bool]) -> None:
         self.coord = coord
         self.marker_visibilities = marker_visibilities
-        if not self.nav_status:
-            wx.CallAfter(
-                Publisher.sendMessage,
-                "From Neuronavigation: Update tracker poses",
-                poses=self.coord.tolist(),
-                visibilities=self.marker_visibilities,
-            )
-            if self.previous_marker_visibilities != self.marker_visibilities:
-                wx.CallAfter(
-                    Publisher.sendMessage,
-                    "Sensors ID",
-                    marker_visibilities=self.marker_visibilities,
-                )
-                wx.CallAfter(Publisher.sendMessage, "Render volume viewer")
-                self.previous_marker_visibilities = self.marker_visibilities
+        if self.coord is None:
+            return
+
+        self._pose_update_data = (
+            self.coord.tolist(),
+            list(self.marker_visibilities),
+        )
+        if not self._pending_pose_update:
+            self._pending_pose_update = True
+            _safe_call_after(self._dispatch_pose_update)
+
+        if self.previous_marker_visibilities != self.marker_visibilities:
+            self._sensor_update_data = list(self.marker_visibilities)
+            if not self._pending_sensors_update:
+                self._pending_sensors_update = True
+                _safe_call_after(self._dispatch_sensors_update)
+            self.previous_marker_visibilities = self.marker_visibilities
 
     def GetCoordinates(self) -> Tuple[Optional[np.ndarray], List[bool]]:
-        if self.nav_status:
-            wx.CallAfter(
-                Publisher.sendMessage,
-                "From Neuronavigation: Update tracker poses",
-                poses=self.coord.tolist(),
-                visibilities=self.marker_visibilities,
-            )
-            if self.previous_marker_visibilities != self.marker_visibilities:
-                wx.CallAfter(
-                    Publisher.sendMessage,
-                    "Sensors ID",
-                    marker_visibilities=self.marker_visibilities,
-                )
-                self.previous_marker_visibilities = self.marker_visibilities
-
         return self.coord, self.marker_visibilities
+
+    def _dispatch_pose_update(self) -> None:
+        self._pending_pose_update = False
+        if self._pose_update_data is None:
+            return
+        poses, visibilities = self._pose_update_data
+        Publisher.sendMessage(
+            "From Neuronavigation: Update tracker poses",
+            poses=poses,
+            visibilities=visibilities,
+        )
+
+    def _dispatch_sensors_update(self) -> None:
+        self._pending_sensors_update = False
+        if self._sensor_update_data is None:
+            return
+        Publisher.sendMessage("Sensors ID", marker_visibilities=self._sensor_update_data)
+        if not self.nav_status:
+            Publisher.sendMessage("Render volume viewer")
 
 
 def GetCoordinatesForThread(

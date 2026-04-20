@@ -18,6 +18,7 @@
 # --------------------------------------------------------------------------
 import itertools
 import os
+import re
 import time
 from functools import partial
 from typing import Optional
@@ -41,6 +42,7 @@ import wx.lib.agw.foldpanelbar as fpb
 import wx.lib.colourselect as csel
 import wx.lib.masked.numctrl
 import wx.lib.platebtn as pbtn
+import wx.lib.scrolledpanel as scrolled
 from wx.lib.mixins.listctrl import ColumnSorterMixin
 
 try:
@@ -179,6 +181,7 @@ class InnerFoldPanel(wx.Panel):
         self.nav_panel = nav_panel = fold_panel.AddFoldPanel(_("Navigation"), collapsed=True)
         self.__id_nav = nav_panel.GetId()
         ntw = NavigationPanel(parent=nav_panel, nav_hub=nav_hub)
+        self.__calc_best_size(ntw)
 
         fold_panel.ApplyCaptionStyle(nav_panel, style)
         fold_panel.AddFoldPanelWindow(nav_panel, ntw, spacing=0, leftSpacing=0, rightSpacing=0)
@@ -1813,15 +1816,16 @@ class NavigationPanel(wx.Panel):
         top_sizer = wx.BoxSizer(wx.HORIZONTAL)
         top_sizer.Add(self.marker_panel, 1, wx.GROW | wx.EXPAND)
 
-        bottom_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        bottom_sizer.Add(self.control_panel, 0, wx.EXPAND | wx.TOP, 5)
-
         main_sizer = wx.BoxSizer(wx.VERTICAL)
         main_sizer.AddMany(
-            [(top_sizer, 1, wx.EXPAND | wx.GROW), (bottom_sizer, 0, wx.ALIGN_CENTER_HORIZONTAL)]
+            [
+                (top_sizer, 1, wx.EXPAND | wx.GROW),
+                (self.control_panel, 0, wx.EXPAND | wx.TOP, 5),
+            ]
         )
         self.sizer = main_sizer
         self.SetSizerAndFit(main_sizer)
+        self.Layout()
         self.Update()
 
     def __bind_events(self):
@@ -1870,9 +1874,14 @@ class ControlPanel(wx.Panel):
 
         self.target_selected = False
 
+        scroll_panel_size = wx.Size(-1, 150) if sys.platform != "win32" else wx.Size(-1, 230)
+        scroll_panel = scrolled.ScrolledPanel(self, -1, size=scroll_panel_size)
+        scroll_panel.SetupScrolling(scroll_x=False, scroll_y=True)
+        self.scroll_panel = scroll_panel
+
         # Toggle button for neuronavigation
         tooltip = _("Start navigation")
-        btn_nav = wx.ToggleButton(self, -1, _("Start navigation"), size=wx.Size(80, -1))
+        btn_nav = wx.ToggleButton(self, -1, _("Start navigation"), size=wx.Size(215, -1))
         btn_nav.SetFont(wx.Font(9, wx.DEFAULT, wx.NORMAL, wx.BOLD))
         btn_nav.SetToolTip(tooltip)
         self.btn_nav = btn_nav
@@ -1893,7 +1902,7 @@ class ControlPanel(wx.Panel):
         tooltip = _("Control Tractography")
         BMP_TRACT = wx.Bitmap(str(inv_paths.ICON_DIR.joinpath("tract.png")), wx.BITMAP_TYPE_PNG)
         tractography_checkbox = wx.ToggleButton(
-            self, -1, "", style=pbtn.PB_STYLE_SQUARE, size=ICON_SIZE
+            scroll_panel, -1, "", style=pbtn.PB_STYLE_SQUARE, size=ICON_SIZE
         )
         tractography_checkbox.SetBackgroundColour(GREY_COLOR)
         tractography_checkbox.SetBitmap(BMP_TRACT)
@@ -1909,7 +1918,7 @@ class ControlPanel(wx.Panel):
         tooltip = _("Track coil")
         BMP_TRACK = wx.Bitmap(str(inv_paths.ICON_DIR.joinpath("coil.png")), wx.BITMAP_TYPE_PNG)
         track_object_button = wx.ToggleButton(
-            self, -1, "", style=pbtn.PB_STYLE_SQUARE, size=ICON_SIZE
+            scroll_panel, -1, "", style=pbtn.PB_STYLE_SQUARE, size=ICON_SIZE
         )
         track_object_button.SetBackgroundColour(GREY_COLOR)
         track_object_button.SetBitmap(BMP_TRACK)
@@ -1927,7 +1936,7 @@ class ControlPanel(wx.Panel):
             str(inv_paths.ICON_DIR.joinpath("lock_to_target.png")), wx.BITMAP_TYPE_PNG
         )
         lock_to_target_button = wx.ToggleButton(
-            self, -1, "", style=pbtn.PB_STYLE_SQUARE, size=ICON_SIZE
+            scroll_panel, -1, "", style=pbtn.PB_STYLE_SQUARE, size=ICON_SIZE
         )
         lock_to_target_button.SetBackgroundColour(GREY_COLOR)
         lock_to_target_button.SetBitmap(BMP_LOCK)
@@ -1944,7 +1953,9 @@ class ControlPanel(wx.Panel):
         BMP_SHOW_COIL = wx.Bitmap(
             str(inv_paths.ICON_DIR.joinpath("coil_eye.png")), wx.BITMAP_TYPE_PNG
         )
-        show_coil_button = wx.ToggleButton(self, -1, "", style=pbtn.PB_STYLE_SQUARE, size=ICON_SIZE)
+        show_coil_button = wx.ToggleButton(
+            scroll_panel, -1, "", style=pbtn.PB_STYLE_SQUARE, size=ICON_SIZE
+        )
         show_coil_button.SetBackgroundColour(GREY_COLOR)
         show_coil_button.SetBitmap(BMP_SHOW_COIL)
         show_coil_button.SetToolTip(tooltip)
@@ -1960,7 +1971,7 @@ class ControlPanel(wx.Panel):
             str(inv_paths.ICON_DIR.joinpath("stylus_eye.png")), wx.BITMAP_TYPE_PNG
         )
         show_probe_button = wx.ToggleButton(
-            self, -1, "", style=pbtn.PB_STYLE_SQUARE, size=ICON_SIZE
+            scroll_panel, -1, "", style=pbtn.PB_STYLE_SQUARE, size=ICON_SIZE
         )
         show_probe_button.SetBackgroundColour(GREY_COLOR)
         show_probe_button.SetBitmap(BMP_SHOW_PROBE)
@@ -1974,7 +1985,7 @@ class ControlPanel(wx.Panel):
         tooltip = _("Enable serial port communication to trigger pulse and create markers")
         BMP_PORT = wx.Bitmap(str(inv_paths.ICON_DIR.joinpath("wave.png")), wx.BITMAP_TYPE_PNG)
         checkbox_serial_port = wx.ToggleButton(
-            self, -1, "", style=pbtn.PB_STYLE_SQUARE, size=ICON_SIZE
+            scroll_panel, -1, "", style=pbtn.PB_STYLE_SQUARE, size=ICON_SIZE
         )
         checkbox_serial_port.SetBackgroundColour(RED_COLOR)
         checkbox_serial_port.SetBitmap(BMP_PORT)
@@ -1988,7 +1999,9 @@ class ControlPanel(wx.Panel):
         # Toggle Button for Efield
         tooltip = _("Control E-Field")
         BMP_FIELD = wx.Bitmap(str(inv_paths.ICON_DIR.joinpath("field.png")), wx.BITMAP_TYPE_PNG)
-        efield_checkbox = wx.ToggleButton(self, -1, "", style=pbtn.PB_STYLE_SQUARE, size=ICON_SIZE)
+        efield_checkbox = wx.ToggleButton(
+            scroll_panel, -1, "", style=pbtn.PB_STYLE_SQUARE, size=ICON_SIZE
+        )
         efield_checkbox.SetBackgroundColour(GREY_COLOR)
         efield_checkbox.SetBitmap(BMP_FIELD)
         efield_checkbox.SetValue(False)
@@ -2003,7 +2016,7 @@ class ControlPanel(wx.Panel):
         tooltip = _("Target mode")
         BMP_TARGET = wx.Bitmap(str(inv_paths.ICON_DIR.joinpath("target.png")), wx.BITMAP_TYPE_PNG)
         target_mode_button = wx.ToggleButton(
-            self, -1, "", style=pbtn.PB_STYLE_SQUARE, size=ICON_SIZE
+            scroll_panel, -1, "", style=pbtn.PB_STYLE_SQUARE, size=ICON_SIZE
         )
         target_mode_button.SetBackgroundColour(GREY_COLOR)
         target_mode_button.SetBitmap(BMP_TARGET)
@@ -2020,7 +2033,7 @@ class ControlPanel(wx.Panel):
             str(inv_paths.ICON_DIR.joinpath("robot_track_target.png")), wx.BITMAP_TYPE_PNG
         )
         robot_track_target_button = wx.ToggleButton(
-            self, -1, "", style=pbtn.PB_STYLE_SQUARE, size=ICON_SIZE
+            scroll_panel, -1, "", style=pbtn.PB_STYLE_SQUARE, size=ICON_SIZE
         )
         robot_track_target_button.SetBackgroundColour(GREY_COLOR)
         robot_track_target_button.SetBitmap(BMP_TRACK_TARGET)
@@ -2039,7 +2052,7 @@ class ControlPanel(wx.Panel):
             str(inv_paths.ICON_DIR.joinpath("robot_move_away.png")), wx.BITMAP_TYPE_PNG
         )
         robot_move_away_button = wx.ToggleButton(
-            self, -1, "", style=pbtn.PB_STYLE_SQUARE, size=ICON_SIZE
+            scroll_panel, -1, "", style=pbtn.PB_STYLE_SQUARE, size=ICON_SIZE
         )
         robot_move_away_button.SetBackgroundColour(GREY_COLOR)
         robot_move_away_button.SetBitmap(BMP_ENABLE_MOVE_AWAY)
@@ -2058,7 +2071,7 @@ class ControlPanel(wx.Panel):
             str(inv_paths.ICON_DIR.joinpath("robot_free_drive.png")), wx.BITMAP_TYPE_PNG
         )
         robot_free_drive_button = wx.ToggleButton(
-            self, -1, "", style=pbtn.PB_STYLE_SQUARE, size=ICON_SIZE
+            scroll_panel, -1, "", style=pbtn.PB_STYLE_SQUARE, size=ICON_SIZE
         )
         robot_free_drive_button.SetBackgroundColour(GREY_COLOR)
         robot_free_drive_button.SetBitmap(BMP_FREE_DRIVE)
@@ -2077,7 +2090,7 @@ class ControlPanel(wx.Panel):
             str(inv_paths.ICON_DIR.joinpath("brain_eye.png")), wx.BITMAP_TYPE_PNG
         )
         show_motor_map_button = wx.ToggleButton(
-            self, -1, "", style=pbtn.PB_STYLE_SQUARE, size=ICON_SIZE
+            scroll_panel, -1, "", style=pbtn.PB_STYLE_SQUARE, size=ICON_SIZE
         )
         show_motor_map_button.SetBackgroundColour(GREY_COLOR)
         show_motor_map_button.SetBitmap(BMP_MOTOR_MAP)
@@ -2094,7 +2107,7 @@ class ControlPanel(wx.Panel):
         start_navigation_button_sizer = wx.BoxSizer(wx.VERTICAL)
         start_navigation_button_sizer.AddMany(
             [
-                (btn_nav, 0, wx.EXPAND | wx.GROW),
+                (btn_nav, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.RIGHT, 15),
             ]
         )
 
@@ -2119,15 +2132,20 @@ class ControlPanel(wx.Panel):
                 (robot_track_target_button),
                 (robot_move_away_button),
                 (robot_free_drive_button),
+                ((48, 48), 0),
             ]
         )
+
+        scroll_sizer = wx.BoxSizer(wx.VERTICAL)
+        scroll_sizer.Add(navigation_buttons_sizer, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.ALL, 10)
+        scroll_sizer.Add(robot_buttons_sizer, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.BOTTOM, 10)
+        scroll_panel.SetSizer(scroll_sizer)
 
         main_sizer = wx.BoxSizer(wx.VERTICAL)
         main_sizer.AddMany(
             [
                 (start_navigation_button_sizer, 0, wx.EXPAND | wx.ALL, 10),
-                (navigation_buttons_sizer, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.TOP | wx.BOTTOM, 10),
-                (robot_buttons_sizer, 0, wx.ALIGN_LEFT | wx.TOP | wx.BOTTOM, 5),
+                (scroll_panel, 0, wx.EXPAND),
             ]
         )
 
@@ -2726,7 +2744,7 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
         # The marker list height is set to 120 pixels (accommodating 4 markers) if the screen height is
         # at most 1080 pixels (a commonly used height in laptops). Otherwise, the height grows linearly with
         # the screen height.
-        marker_list_height = max(120, int(screen_height / 4))
+        marker_list_height = max(120, int(screen_height / 5))
         self.marker_list_height = marker_list_height
 
         marker_list_ctrl = wx.ListCtrl(
@@ -2773,6 +2791,7 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
         marker_list_ctrl.Bind(wx.EVT_LIST_ITEM_SELECTED, self.OnMarkerFocused)
         marker_list_ctrl.Bind(wx.EVT_LIST_ITEM_DESELECTED, self.OnMarkerUnfocused)
         marker_list_ctrl.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.SetCameraToFocusOnMarker)
+        marker_list_ctrl.Bind(wx.EVT_CHAR_HOOK, self.OnMarkerListKeyDown)
 
         self.marker_list_ctrl = marker_list_ctrl
         self.column_sorter = ColumnSorterMixin.__init__(
@@ -2817,6 +2836,7 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
         brain_targets_list_ctrl.Bind(
             wx.EVT_LIST_ITEM_RIGHT_CLICK, self.OnMouseRightDownBrainTargets
         )
+        brain_targets_list_ctrl.Bind(wx.EVT_CHAR_HOOK, self.OnBrainTargetsKeyDown)
         self.brain_targets_list_ctrl = brain_targets_list_ctrl
         # In the future, it would be better if the panel could initialize itself based on markers in MarkersControl
         try:
@@ -2903,6 +2923,15 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
             selection.append(next)
             next = self.marker_list_ctrl.GetNextSelected(next)
 
+        return selection
+
+    def __get_selected_brain_targets(self):
+        """Returns a (possibly empty) list of the selected items in the brain targets list control."""
+        selection = []
+        next = self.brain_targets_list_ctrl.GetFirstSelected()
+        while next != -1:
+            selection.append(next)
+            next = self.brain_targets_list_ctrl.GetNextSelected(next)
         return selection
 
     def __delete_multiple_markers(self, indexes):
@@ -3135,15 +3164,15 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
         # Check if the currently focused marker is of the type 'fiducial'.
         is_fiducial = marker_type == MarkerType.FIDUCIAL
 
+        e_field_loaded = self.navigation.e_field_loaded
+
         # Create the context menu.
         menu_id = wx.Menu()
 
-        edit_id = menu_id.Append(unique_menu_id, _("Change label"))  # Use non-zero ID
+        edit_id = menu_id.Append(unique_menu_id, _("Change label"))
         menu_id.Bind(wx.EVT_MENU, self.ChangeLabel, edit_id)
 
-        color_id = menu_id.Append(
-            unique_menu_id + 1, _("Change color")
-        )  # Increment the unique_menu_id
+        color_id = menu_id.Append(unique_menu_id + 1, _("Change color"))
         menu_id.Bind(wx.EVT_MENU, self.ChangeColor, color_id)
 
         delete_id = menu_id.Append(unique_menu_id + 2, _("Delete"))
@@ -3165,18 +3194,18 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
                 menu_id.Bind(wx.EVT_MENU, self.OnMenuUnsetTarget, target_menu_item)
                 if has_mTMS:
                     brain_target_menu_item = menu_id.Append(
-                        unique_menu_id + 4, _("Set brain target")
+                        unique_menu_id + 6, _("Set brain target")
                     )
                     menu_id.Bind(wx.EVT_MENU, self.OnSetBrainTarget, brain_target_menu_item)
             else:
-                target_menu_item = menu_id.Append(unique_menu_id + 5, _("Set as target"))
+                target_menu_item = menu_id.Append(unique_menu_id + 7, _("Set as target"))
                 menu_id.Bind(wx.EVT_MENU, self.OnMenuSetTarget, target_menu_item)
 
         # Show 'Create coil target' menu item if the marker is a coil pose.
         if is_coil_pose:
             # 'Create coil target' menu item.
             create_coil_target_menu_item = menu_id.Append(
-                unique_menu_id + 6, _("Create coil target")
+                unique_menu_id + 8, _("Create coil target")
             )
             menu_id.Bind(
                 wx.EVT_MENU, self.OnCreateCoilTargetFromCoilPose, create_coil_target_menu_item
@@ -3186,7 +3215,7 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
         if is_landmark:
             # 'Create brain target' menu item.
             create_brain_target_menu_item = menu_id.Append(
-                unique_menu_id + 5, _("Create brain target")
+                unique_menu_id + 9, _("Create brain target")
             )
             menu_id.Bind(
                 wx.EVT_MENU, self.OnCreateBrainTargetFromLandmark, create_brain_target_menu_item
@@ -3194,7 +3223,7 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
 
             # 'Create coil target' menu item.
             create_coil_target_menu_item = menu_id.Append(
-                unique_menu_id + 6, _("Create coil target")
+                unique_menu_id + 10, _("Create coil target")
             )
             menu_id.Bind(
                 wx.EVT_MENU, self.OnCreateCoilTargetFromLandmark, create_coil_target_menu_item
@@ -3203,63 +3232,52 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
         is_brain_target = focused_marker.marker_type == MarkerType.BRAIN_TARGET
         if is_brain_target and has_mTMS:
             send_brain_target_menu_item = menu_id.Append(
-                unique_menu_id + 7, _("Send brain target to mTMS")
+                unique_menu_id + 11, _("Send brain target to mTMS")
             )
             menu_id.Bind(wx.EVT_MENU, self.OnSendBrainTarget, send_brain_target_menu_item)
 
-        if self.nav_status and self.navigation.e_field_loaded:
+        if self.nav_status and e_field_loaded:
             # Publisher.sendMessage('Check efield data')
-            # if not tuple(np.argwhere(self.indexes_saved_lists == self.marker_list_ctrl.GetFocusedItem())):
             if is_active_target:
-                efield_menu_item = menu_id.Append(unique_menu_id + 8, _("Save Efield target Data"))
+                efield_menu_item = menu_id.Append(unique_menu_id + 12, _("Save Efield target Data"))
                 menu_id.Bind(wx.EVT_MENU, self.OnMenuSaveEfieldTargetData, efield_menu_item)
 
-        if self.navigation.e_field_loaded:
+        if e_field_loaded:
             efield_target_menu_item = menu_id.Append(
                 unique_menu_id + 13, _("Clear saved Efield data")
             )
             menu_id.Bind(wx.EVT_MENU, self.OnClearEfieldSavedData, efield_target_menu_item)
 
             efield_target_menu_item = menu_id.Append(
-                unique_menu_id + 9, _("Set as Efield target 1 (origin)")
+                unique_menu_id + 14, _("Set as Efield target 1 (origin)")
             )
             menu_id.Bind(wx.EVT_MENU, self.OnMenuSetEfieldTarget, efield_target_menu_item)
 
             efield_target_menu_item = menu_id.Append(
-                unique_menu_id + 10, _("Set as Efield target 2")
+                unique_menu_id + 15, _("Set as Efield target 2")
             )
             menu_id.Bind(wx.EVT_MENU, self.OnMenuSetEfieldTarget2, efield_target_menu_item)
-            # Publisher.sendMessage('Check efield data')
-            # if self.efield_data_saved:
-            #     if tuple(np.argwhere(self.indexes_saved_lists==self.marker_list_ctrl.GetFocusedItem())):
-            #         if self.efield_target_idx  == self.marker_list_ctrl.GetFocusedItem():
-            #             efield_target_menu_item  = menu_id.Append(unique_menu_id + 9, _('Remove Efield target'))
-            #             menu_id.Bind(wx.EVT_MENU, self.OnMenuRemoveEfieldTarget, efield_target_menu_item )
-            #         else:
-            #             efield_target_menu_item = menu_id.Append(unique_menu_id + 9, _('Set as Efield target(compare)'))
-            #             menu_id.Bind(wx.EVT_MENU, self.OnMenuSetEfieldTarget, efield_target_menu)
 
-        if self.navigation.e_field_loaded and not self.nav_status:
+        if e_field_loaded and not self.nav_status:
             if is_active_target:
                 efield_vector_plot_menu_item = menu_id.Append(
-                    unique_menu_id + 11, _("Show vector field")
+                    unique_menu_id + 16, _("Show vector field")
                 )
                 menu_id.Bind(wx.EVT_MENU, self.OnMenuShowVectorField, efield_vector_plot_menu_item)
 
-        if self.navigation.e_field_loaded:
+        if e_field_loaded:
             if focused_marker.is_point_of_interest:
                 create_efield_target = menu_id.Append(
-                    unique_menu_id + 12, _("Remove Efield Cortex target")
+                    unique_menu_id + 17, _("Remove Efield Cortex target")
                 )
                 menu_id.Bind(
                     wx.EVT_MENU, self.OnMenuRemoveEfieldTargetatCortex, create_efield_target
                 )
             else:
                 create_efield_target = menu_id.Append(
-                    unique_menu_id + 12, _("Set as Efield Cortex target")
+                    unique_menu_id + 18, _("Set as Efield Cortex target")
                 )
                 menu_id.Bind(wx.EVT_MENU, self.OnSetEfieldBrainTarget, create_efield_target)
-                self.marker_list_ctrl.GetFocusedItem()
 
         menu_id.AppendSeparator()
 
@@ -3267,40 +3285,64 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
         menu_id.Destroy()
 
     def OnMouseRightDownBrainTargets(self, evt):
-        focused_marker_idx = self.brain_targets_list_ctrl.GetFocusedItem()
-        focused_marker = self.currently_focused_marker.brain_target_list[focused_marker_idx]
-        self.focused_brain_marker = focused_marker
-        unique_menu_id = 1
+        if not self.currently_focused_marker:
+            return
 
-        # Check if the currently focused marker is the active target.
-        is_active_target = focused_marker["is_target"]
+        selected_indices = self.__get_selected_brain_targets()
+        selection_count = len(selected_indices)
+
+        # For single selection, set the focused brain marker for single-item actions.
+        if selection_count == 1:
+            focused_marker_idx = selected_indices[0]
+            focused_marker = self.currently_focused_marker.brain_target_list[focused_marker_idx]
+            self.focused_brain_marker = focused_marker
+        elif selection_count == 0:
+            # Fall back to the focused item if nothing is explicitly selected.
+            focused_marker_idx = self.brain_targets_list_ctrl.GetFocusedItem()
+            if focused_marker_idx != -1:
+                focused_marker = self.currently_focused_marker.brain_target_list[focused_marker_idx]
+                self.focused_brain_marker = focused_marker
+                selection_count = 1
 
         # Create the context menu.
         menu_id = wx.Menu()
 
-        edit_id = menu_id.Append(unique_menu_id, _("Change label"))  # Use non-zero ID
-        menu_id.Bind(wx.EVT_MENU, self.ChangeLabelBrainTarget, edit_id)
+        # Single-item actions: only shown when exactly 1 target is selected.
+        if selection_count == 1:
+            edit_id = menu_id.Append(wx.ID_ANY, _("Change label"))
+            menu_id.Bind(wx.EVT_MENU, self.ChangeLabelBrainTarget, edit_id)
 
-        delete_id = menu_id.Append(unique_menu_id + 2, _("Delete"))
-        menu_id.Bind(wx.EVT_MENU, self.OnDeleteSelectedBrainTarget, delete_id)
-
-        menu_id.AppendSeparator()
-
-        mep_menu_item = menu_id.Append(unique_menu_id + 3, _("Change MEP value"))
-        menu_id.Bind(wx.EVT_MENU, self.OnMenuChangeMEPBrainTarget, mep_menu_item)
-
-        create_coil_target_menu_item = menu_id.Append(unique_menu_id + 4, _("Create coil target"))
-        menu_id.Bind(
-            wx.EVT_MENU, self.OnCreateCoilTargetFromBrainTargets, create_coil_target_menu_item
-        )
-
-        if has_mTMS:
-            send_brain_target_menu_item = menu_id.Append(
-                unique_menu_id + 5, _("Send brain target to mTMS")
+        # Delete option — label adapts to count.
+        if selection_count == 1:
+            delete_id = menu_id.Append(wx.ID_ANY, _("Delete target"))
+            menu_id.Bind(wx.EVT_MENU, self.OnDeleteSelectedBrainTarget, delete_id)
+        elif selection_count > 1:
+            delete_id = menu_id.Append(
+                wx.ID_ANY, _("Delete selected targets (%d)") % selection_count
             )
-            menu_id.Bind(wx.EVT_MENU, self.OnSendBrainTarget, send_brain_target_menu_item)
+            menu_id.Bind(wx.EVT_MENU, self.OnDeleteSelectedBrainTarget, delete_id)
 
-        menu_id.AppendSeparator()
+        # "Delete all" is always available.
+        delete_all_id = menu_id.Append(wx.ID_ANY, _("Delete all targets"))
+        menu_id.Bind(wx.EVT_MENU, self.OnDeleteAllBrainTargets, delete_all_id)
+
+        # Single-item actions below the separator.
+        if selection_count == 1:
+            menu_id.AppendSeparator()
+
+            mep_menu_item = menu_id.Append(wx.ID_ANY, _("Change MEP value"))
+            menu_id.Bind(wx.EVT_MENU, self.OnMenuChangeMEPBrainTarget, mep_menu_item)
+
+            create_coil_target_menu_item = menu_id.Append(wx.ID_ANY, _("Create coil target"))
+            menu_id.Bind(
+                wx.EVT_MENU, self.OnCreateCoilTargetFromBrainTargets, create_coil_target_menu_item
+            )
+
+            if has_mTMS:
+                send_brain_target_menu_item = menu_id.Append(
+                    wx.ID_ANY, _("Send brain target to mTMS")
+                )
+                menu_id.Bind(wx.EVT_MENU, self.OnSendBrainTarget, send_brain_target_menu_item)
 
         self.PopupMenu(menu_id)
         menu_id.Destroy()
@@ -3543,6 +3585,22 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
             if current_uuid == target_uuid:
                 self.itemDataMap[key][const.TARGET_COLUMN] = "Yes"
 
+    @staticmethod
+    def _make_copy_label(original_label: str, existing_labels: list[str]) -> str:
+        """Generate a duplicate label that avoids stacking, e.g. 'M (copy)', 'M (copy 2)'."""
+        # Strip an existing " (copy)" or " (copy N)" suffix so we always work from the base.
+        base = re.sub(r" \(copy(?: \d+)?\)$", "", original_label)
+
+        candidate = f"{base} (copy)"
+        if candidate not in existing_labels:
+            return candidate
+
+        # Find the next available number.
+        n = 2
+        while f"{base} (copy {n})" in existing_labels:
+            n += 1
+        return f"{base} (copy {n})"
+
     def _DuplicateMarker(
         self, marker_idx: Optional[int] = None, duplicate_brain_target_list: bool = True
     ) -> None:
@@ -3570,13 +3628,23 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
         marker = self.__get_marker(marker_idx)
         new_marker = marker.duplicate()
 
-        # Update duplicate attributes
-        new_marker.label = f"{new_marker.label} (copy)"
+        # Generate a unique copy label that avoids stacking.
+        existing_labels = [m.label for m in self.markers.list]
+        new_marker.label = self._make_copy_label(new_marker.label, existing_labels)
+
         if not duplicate_brain_target_list:
             new_marker.brain_target_list = []
+        else:
+            # Regenerate UUIDs for each brain target to avoid collisions with the original.
+            for brain_target in new_marker.brain_target_list:
+                brain_target["marker_uuid"] = str(uuid.uuid4())
 
         # Add the new marker
         self.markers.AddMarker(new_marker, render=True, focus=True)
+
+        # Scroll the marker list to ensure the duplicated marker is visible.
+        new_index = self.marker_list_ctrl.GetItemCount() - 1
+        self.marker_list_ctrl.EnsureVisible(new_index)
 
         # Update target if necessary
         if set_target:
@@ -3585,12 +3653,51 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
                 self.markers.UnsetTarget(current_target.marker_id)
             self.markers.SetTarget(new_marker.marker_id)
 
+        # Force brain target visualization refresh to ensure correct rendering.
+        if new_marker.brain_target_list:
+            self.OnMarkerFocused(evt=None)
+
+    def OnMarkerListKeyDown(self, evt):
+        """Handle keyboard shortcuts on the marker list (Ctrl/Cmd+D to duplicate)."""
+        key_code = evt.GetKeyCode()
+        if (
+            key_code in (ord("D"), ord("d"))
+            and (evt.ControlDown() or evt.CmdDown())
+            and not evt.ShiftDown()
+        ):
+            # Handle Ctrl+D for duplication
+            self.OnMenuDuplicateMarker(None)
+
+        # Always skip the event to allow other handlers (like menu accelerators) to process it
+        evt.Skip()
+
     def OnMenuDuplicateMarker(self, evt):
         marker_idx = self.marker_list_ctrl.GetFocusedItem()
         if marker_idx == -1:
             wx.MessageBox(_("No data selected."), _("InVesalius 3"))
             return
-        self._DuplicateMarker(marker_idx)
+
+        marker = self.__get_marker(marker_idx)
+
+        # If the marker has brain targets, ask the user whether to duplicate them.
+        if marker.brain_target_list:
+            dlg_confirm = wx.MessageDialog(
+                self,
+                _("Duplicate associated brain targets as well?"),
+                _("Duplicate Marker"),
+                wx.YES_NO | wx.CANCEL | wx.ICON_QUESTION,
+            )
+            result = dlg_confirm.ShowModal()
+            dlg_confirm.Destroy()
+
+            if result == wx.ID_CANCEL:
+                return
+
+            duplicate_brain_targets = result == wx.ID_YES
+            self._DuplicateMarker(marker_idx, duplicate_brain_target_list=duplicate_brain_targets)
+        else:
+            # No brain targets — duplicate directly without prompting.
+            self._DuplicateMarker(marker_idx)
 
     def GetEfieldDataStatus(self, efield_data_loaded, indexes_saved_list):
         self.indexes_saved_lists = []
@@ -3818,6 +3925,7 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
 
         if marker_coil.brain_target_list:
             self.marker_list_ctrl.SetItemBackgroundColour(list_index, wx.Colour(251, 243, 226))
+            self.marker_list_ctrl.SetItemTextColour(list_index, wx.Colour(0, 0, 0))
         self.OnMarkerFocused(evt=None)
         self.markers.SaveState()
         dialog.Destroy()
@@ -3879,6 +3987,7 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
         # Update the marker list control.
         if marker.brain_target_list:
             self.marker_list_ctrl.SetItemBackgroundColour(idx, wx.Colour(251, 243, 226))
+            self.marker_list_ctrl.SetItemTextColour(idx, wx.Colour(0, 0, 0))
         else:
             self.marker_list_ctrl.SetItemBackgroundColour(idx, "white")
         self.marker_list_ctrl.SetItem(idx, const.TARGET_COLUMN, "")
@@ -3906,10 +4015,9 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
         For an index in self.marker_list_ctrl, returns the corresponding marker_id
         """
         current_uuid = self.marker_list_ctrl.GetItem(idx, const.UUID).GetText()
-        for marker in self.markers.list:
-            if current_uuid == marker.marker_uuid:
-                marker_id = self.markers.list.index(marker)
-                return int(marker_id)
+        for i, marker in enumerate(self.markers.list):
+            if marker.marker_uuid == current_uuid:
+                return i
         list_item = self.marker_list_ctrl.GetItem(idx, const.ID_COLUMN)
         return int(list_item.GetText())
 
@@ -4068,19 +4176,76 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
             self.currently_focused_marker = None  # disable focus if no markers left
 
     def OnDeleteSelectedBrainTarget(self, evt):
-        list_index = self.brain_targets_list_ctrl.GetFocusedItem()
-        if list_index == -1:
-            wx.MessageBox(_("No data selected."), _("InVesalius 3"))
+        if not self.currently_focused_marker:
             return
+
+        selected_indices = self.__get_selected_brain_targets()
+
+        # Fall back to the focused item if nothing is explicitly selected (single-click compat).
+        if not selected_indices:
+            focused = self.brain_targets_list_ctrl.GetFocusedItem()
+            if focused == -1:
+                wx.MessageBox(_("No data selected."), _("InVesalius 3"))
+                return
+            selected_indices = [focused]
+
+        # Confirmation dialog for bulk deletion (more than 1 target).
+        if len(selected_indices) > 1:
+            msg = _("Delete %d brain targets?") % len(selected_indices)
+            result = dlg.ShowConfirmationDialog(msg=msg)
+            if result != wx.ID_OK:
+                return
+
+        # Collect UUIDs of all selected brain targets.
+        uuids_to_delete = set()
+        for idx in selected_indices:
+            uuid = self.brain_targets_list_ctrl.GetItemText(idx, const.BRAIN_UUID)
+            uuids_to_delete.add(uuid)
+
+        # Filter out the deleted entries in one pass.
         brain_target_list = self.currently_focused_marker.brain_target_list
-        target_uuid = self.brain_targets_list_ctrl.GetItemText(list_index, const.BRAIN_UUID)
-        # Remove entry with the specified UUID
-        markers = [
-            marker for marker in brain_target_list if marker.get("marker_uuid") != target_uuid
+        self.currently_focused_marker.brain_target_list = [
+            marker
+            for marker in brain_target_list
+            if marker.get("marker_uuid") not in uuids_to_delete
         ]
-        self.currently_focused_marker.brain_target_list = markers
         self.OnMarkerFocused(evt=None)
         self.markers.SaveState()
+
+    def OnDeleteAllBrainTargets(self, evt):
+        """Delete all brain targets for the currently focused parent marker."""
+        if not self.currently_focused_marker:
+            return
+
+        target_count = len(self.currently_focused_marker.brain_target_list)
+        if target_count == 0:
+            return
+
+        msg = _("Delete all %d brain targets?") % target_count
+        result = dlg.ShowConfirmationDialog(msg=msg)
+        if result != wx.ID_OK:
+            return
+
+        self.currently_focused_marker.brain_target_list = []
+        self.OnMarkerFocused(evt=None)
+        self.markers.SaveState()
+
+    def OnBrainTargetsKeyDown(self, evt):
+        """Handle keyboard shortcuts for the brain targets sub-list."""
+        if not self.brain_targets_list_ctrl.HasFocus():
+            evt.Skip()
+            return
+
+        key_code = evt.GetKeyCode()
+
+        if key_code == wx.WXK_DELETE or key_code == wx.WXK_BACK:
+            self.OnDeleteSelectedBrainTarget(evt)
+        elif key_code in (ord("A"), ord("a")) and (evt.ControlDown() or evt.CmdDown()):
+            # Select all items in the brain targets list.
+            for i in range(self.brain_targets_list_ctrl.GetItemCount()):
+                self.brain_targets_list_ctrl.Select(i)
+        else:
+            evt.Skip()
 
     def GetNextMarkerLabel(self):
         return self.markers.GetNextMarkerLabel()
@@ -4387,7 +4552,6 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
             label = self.GetNextMarkerLabel()
 
         marker = Marker()
-
         marker.position = position or self.current_position
         marker.orientation = orientation or self.current_orientation
 
@@ -4453,6 +4617,7 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
 
         if marker.brain_target_list:
             self.marker_list_ctrl.SetItemBackgroundColour(num_items, wx.Colour(251, 243, 226))
+            self.marker_list_ctrl.SetItemTextColour(num_items, wx.Colour(0, 0, 0))
 
         self.marker_list_ctrl.EnsureVisible(num_items)
 

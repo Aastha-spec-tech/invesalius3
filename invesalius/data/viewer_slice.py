@@ -213,7 +213,7 @@ class Viewer(wx.Panel):
         self.slice_data = None
 
         self.slice_actor = None
-        self.interpolation_slice_status = True
+        self.interpolation_slice_status = False
 
         self.canvas = None
 
@@ -401,7 +401,6 @@ class Viewer(wx.Panel):
                 values = [_("R"), _("L"), _("T"), _("B")]
 
             left_text = self.left_text = vtku.TextZero()
-            left_text.ShadowOff()
             left_text.SetColour(colour)
             left_text.SetPosition(const.TEXT_POS_VCENTRE_LEFT)
             left_text.SetVerticalJustificationToCentered()
@@ -409,7 +408,6 @@ class Viewer(wx.Panel):
             left_text.SetSymbolicSize(wx.FONTSIZE_LARGE)
 
             right_text = self.right_text = vtku.TextZero()
-            right_text.ShadowOff()
             right_text.SetColour(colour)
             right_text.SetPosition(const.TEXT_POS_VCENTRE_RIGHT_ZERO)
             right_text.SetVerticalJustificationToCentered()
@@ -418,7 +416,6 @@ class Viewer(wx.Panel):
             right_text.SetSymbolicSize(wx.FONTSIZE_LARGE)
 
             up_text = self.up_text = vtku.TextZero()
-            up_text.ShadowOff()
             up_text.SetColour(colour)
             up_text.SetPosition(const.TEXT_POS_HCENTRE_UP)
             up_text.SetJustificationToCentered()
@@ -426,7 +423,6 @@ class Viewer(wx.Panel):
             up_text.SetSymbolicSize(wx.FONTSIZE_LARGE)
 
             down_text = self.down_text = vtku.TextZero()
-            down_text.ShadowOff()
             down_text.SetColour(colour)
             down_text.SetPosition(const.TEXT_POS_HCENTRE_DOWN_ZERO)
             down_text.SetJustificationToCentered()
@@ -573,15 +569,91 @@ class Viewer(wx.Panel):
 
     def Reposition(self, slice_data):
         """
-        Based on code of method Zoom in the
-        vtkInteractorStyleRubberBandZoom, the of
-        vtk 5.4.3
+        Fit the slice image to fill the viewport while maintaining aspect ratio.
         """
-        ren = slice_data.renderer
-        # size = ren.GetSize()
+        if slice_data is None or slice_data.renderer is None or slice_data.actor is None:
+            return
 
+        ren = slice_data.renderer
+        cam = ren.GetActiveCamera()
+        actor = slice_data.actor
+
+        # First, reset camera to center on the actor and get proper focal point
         ren.ResetCamera()
-        ren.GetActiveCamera().Zoom(1.0)
+
+        # Get image bounds in world coordinates
+        bounds = actor.GetBounds()
+        if bounds is None:
+            if not self.nav_status:
+                self.UpdateRender()
+            return
+
+        # For 2D slices, one dimension is always zero (the slice plane)
+        # We need to identify which two dimensions are actually visible
+        # based on the orientation
+        x_size = bounds[1] - bounds[0]
+        y_size = bounds[3] - bounds[2]
+        z_size = bounds[5] - bounds[4]
+
+        # Determine visible dimensions based on orientation
+        if self.orientation == "AXIAL":
+            # XY plane visible
+            width = x_size
+            height = y_size
+        elif self.orientation == "SAGITAL":
+            # YZ plane visible
+            width = y_size
+            height = z_size
+        else:  # CORONAL
+            # XZ plane visible
+            width = x_size
+            height = z_size
+
+        # Get viewport dimensions in pixels
+        viewport_width, viewport_height = ren.GetSize()
+
+        # Safety checks
+        if viewport_width <= 0 or viewport_height <= 0 or width <= 0 or height <= 0:
+            if not self.nav_status:
+                self.UpdateRender()
+            return
+
+        # Calculate viewport aspect ratio
+        viewport_aspect = viewport_width / viewport_height
+        image_aspect = width / height
+
+        # Compute proper parallel scale for optimal fit
+        # ParallelScale is half the height of the view in world coordinates
+
+        # Calculate both scales
+        scale_x = (width / viewport_aspect) / 2.0
+        scale_y = height / 2.0
+
+        # Use maximum scale to fill viewport as much as possible
+        # This ensures the image occupies maximum space
+        scale = max(scale_x, scale_y)
+
+        # Adaptive margin based on aspect ratio difference
+        # If aspect ratios are similar, use smaller margin
+        # If aspect ratios are very different, use larger margin
+        aspect_ratio_diff = abs(image_aspect - viewport_aspect) / max(image_aspect, viewport_aspect)
+
+        if aspect_ratio_diff < 0.1:
+            # Very similar aspect ratios - minimal margin
+            margin = 1.005
+        elif aspect_ratio_diff < 0.3:
+            # Moderate difference - small margin
+            margin = 1.01
+        else:
+            # Large difference - slightly larger margin to prevent "too close"
+            margin = 1.015
+
+        scale *= margin
+
+        # Apply the calculated scale
+        cam.SetParallelScale(scale)
+        ren.ResetCameraClippingRange()
+
         if not self.nav_status:
             self.UpdateRender()
 
@@ -623,6 +695,8 @@ class Viewer(wx.Panel):
         :param position: list of 6 coordinates in vtk world coordinate system wx, wy, wz
         """
         self.cross.SetFocalPoint(position[:3])
+        if not self.nav_status:
+            self.UpdateSlicesPosition(position[:3])
 
     def ScrollSlice(self, coord):
         if self.orientation == "AXIAL":
@@ -940,6 +1014,7 @@ class Viewer(wx.Panel):
         Publisher.subscribe(self.GetCrossPos, "Set Update cross pos")
         Publisher.subscribe(self.UpdateCross, "Update cross pos")
         Publisher.subscribe(self.OnNavigationStatus, "Navigation status")
+        Publisher.subscribe(self.OnHighlightMarker, "Highlight marker")
 
     def RefreshViewer(self):
         self.Refresh()
@@ -1073,12 +1148,54 @@ class Viewer(wx.Panel):
     def OnNavigationStatus(self, nav_status, vis_status):
         self.nav_status = nav_status
 
+    def OnSize(self, evt):
+        """
+        Handle window resize events to maintain proper fit.
+        """
+        if self.slice_data:
+            wx.CallAfter(self.Reposition, self.slice_data)
+        if evt:
+            evt.Skip()
+
+    def _deferred_reposition(self):
+        """
+        Deferred repositioning to ensure window is fully initialized.
+
+        This is particularly important on Windows and macOS where the initial
+        window size may not be finalized when SetInput is called, leading to
+        incorrect camera positioning. Uses a timer to ensure AUI pane layout
+        is completely finished before repositioning.
+        """
+        if self.slice_data:
+            # Use a timer with a small delay to ensure AUI manager has
+            # completely finished laying out panes. CallAfter alone is not
+            # sufficient as the AUI manager may still be adjusting dimensions.
+            wx.CallLater(100, self._do_reposition)
+
+    def _do_reposition(self):
+        """
+        Actually perform the repositioning after layout is complete.
+
+        This is called after a delay to ensure the viewport has its final
+        dimensions from the AUI manager.
+        """
+        if self.slice_data:
+            # Force a layout update to ensure dimensions are current
+            self.Layout()
+            self.Update()
+
+            # Now reposition with correct viewport size
+            self.Reposition(self.slice_data)
+            if not self.nav_status:
+                self.UpdateRender()
+
     def __bind_events_wx(self):
         self.scroll.Bind(wx.EVT_SCROLL, self.OnScrollBar)
         self.scroll.Bind(wx.EVT_SCROLL_THUMBTRACK, self.OnScrollBarRelease)
         # self.scroll.Bind(wx.EVT_SCROLL_ENDSCROLL, self.OnScrollBarRelease)
         self.interactor.Bind(wx.EVT_KEY_DOWN, self.OnKeyDown)
         self.interactor.Bind(wx.EVT_RIGHT_UP, self.OnContextMenu)
+        self.interactor.Bind(wx.EVT_SIZE, self.OnSize)
 
     def LoadImagedata(self, mask_dict):
         self.SetInput(mask_dict)
@@ -1166,7 +1283,7 @@ class Viewer(wx.Panel):
         # enough to show all slices.
         self.set_slice_number(max_slice_number - 1)
         self.__update_camera()
-        self.slice_data.renderer.ResetCamera()
+        self.Reposition(self.slice_data)
         self.interactor.GetRenderWindow().AddRenderer(self.slice_data.renderer)
         if not self.nav_status:
             self.UpdateRender()
@@ -1178,6 +1295,12 @@ class Viewer(wx.Panel):
 
         ## Insert cursor
         self.SetInteractorStyle(const.STATE_DEFAULT)
+
+        # Fix for Windows: Ensure proper repositioning after window is fully initialized
+        # On Windows, the initial Reposition may occur before the window has its final size,
+        # causing incorrect alignment. This deferred call ensures repositioning happens
+        # after the window layout is complete.
+        wx.CallAfter(self._deferred_reposition)
 
     def __build_cross_lines(self):
         renderer = self.slice_data.overlay_renderer
@@ -1251,9 +1374,9 @@ class Viewer(wx.Panel):
 
         session = ses.Session()
         if session.GetConfig("slice_interpolation"):
-            actor.InterpolateOff()
-        else:
             actor.InterpolateOn()
+        else:
+            actor.InterpolateOff()
 
         slice_data = sd.SliceData()
         slice_data.SetOrientation(self.orientation)
@@ -1272,9 +1395,9 @@ class Viewer(wx.Panel):
         if self.slice_actor is not None:
             session = ses.Session()
             if session.GetConfig("slice_interpolation"):
-                self.slice_actor.InterpolateOff()
-            else:
                 self.slice_actor.InterpolateOn()
+            else:
+                self.slice_actor.InterpolateOff()
             if not self.nav_status:
                 self.UpdateRender()
 
@@ -1318,16 +1441,14 @@ class Viewer(wx.Panel):
         cp_draw_list = self.canvas.draw_list[:]
         self.canvas.draw_list = []
 
-        # Removing all measures
+        # Removing all measures securely avoiding module caching isinstance bugs
         for i in cp_draw_list:
-            if not isinstance(
-                i,
-                (
-                    measures.AngularMeasure,
-                    measures.LinearMeasure,
-                    measures.CircleDensityMeasure,
-                    measures.PolygonDensityMeasure,
-                ),
+            if type(i).__name__ not in (
+                "AngularMeasure",
+                "LinearMeasure",
+                "AnnotationMeasure",
+                "CircleDensityMeasure",
+                "PolygonDensityMeasure",
             ):
                 self.canvas.draw_list.append(i)
 
@@ -1370,6 +1491,40 @@ class Viewer(wx.Panel):
             "Change slice from slice plane", orientation=self.orientation, index=pos
         )
 
+    def UpdateStatusbarInfo(self):
+        try:
+            if not hasattr(self, "slice_") or self.slice_ is None:
+                return
+            if not hasattr(self.slice_, "matrix") or self.slice_.matrix is None:
+                return
+            if self.slice_data is None:
+                return
+
+            mx, my = self.get_vtk_mouse_position()
+            px, py = self.get_slice_pixel_coord_by_screen_pos(mx, my)
+            slice_number = self.slice_data.number
+
+            matrix = self.slice_.matrix
+            dz, dy, dx = matrix.shape
+
+            if self.orientation == "AXIAL":
+                vx, vy, vz = int(px), int(py), slice_number
+            elif self.orientation == "CORONAL":
+                vx, vy, vz = int(px), slice_number, int(py)
+            else:  # SAGITAL
+                vx, vy, vz = slice_number, int(px), int(py)
+
+            if 0 <= vx < dx and 0 <= vy < dy and 0 <= vz < dz:
+                voxel_value = matrix[vz, vy, vx]
+                info = (
+                    f"Window: {self.orientation.capitalize()}  |  "
+                    f"Pos: ({int(px)}, {int(py)})  Slice: {slice_number}  |  "
+                    f"Value: {voxel_value}"
+                )
+                Publisher.sendMessage("Update statusbar image info", info=info)
+        except Exception:
+            pass
+
     def OnScrollBar(self, evt=None, update3D=True):
         pos = self.scroll.GetThumbPosition()
         self.set_slice_number(pos)
@@ -1386,6 +1541,8 @@ class Viewer(wx.Panel):
             self.style.OnScrollBar()
         except AttributeError:
             pass
+
+        self.UpdateStatusbarInfo()
 
         if evt:
             if self._flush_buffer:
@@ -1581,7 +1738,47 @@ class Viewer(wx.Panel):
         elif (axis0, axis1) == (1, 0):
             cursor.SetSpacing((spacing[0], spacing[2], spacing[1]))
 
-        self.slice_data.renderer.ResetCamera()
+        # After axis swap, dimensions change, so we need to:
+        # 1. Update scroll bar range
+        # 2. Reset to middle slice (to avoid out-of-range indices)
+        # 3. Reposition camera for proper fit
+        # Use CallAfter to ensure data is fully updated before repositioning
+        wx.CallAfter(self._reposition_after_swap)
+
+    def _reposition_after_swap(self):
+        """
+        Helper method to reposition camera after axis swap.
+        Called via wx.CallAfter to ensure all data updates are complete.
+
+        After axis swap, the volume dimensions change, so we need to:
+        1. Update scroll bar to reflect new slice count
+        2. Reset to middle slice (to avoid out-of-range indices)
+        3. Ensure slice data is fully loaded with new bounds
+        4. Apply proper fit-to-view scaling
+        """
+        # Get the new maximum slice number for this orientation
+        max_slice_number = sl.Slice().GetMaxSliceNumber(self.orientation)
+
+        # Update scroll bar with new range
+        self.scroll.SetScrollbar(wx.SB_VERTICAL, 1, max_slice_number + 1, max_slice_number + 1)
+
+        # Set to middle slice to ensure visibility
+        middle_slice = max_slice_number // 2
+        self.scroll.SetThumbPosition(middle_slice)
+
+        # Reload the slice at the new position - this updates actor input data
+        self.set_slice_number(middle_slice)
+
+        # Force actor to update its bounds with new data
+        self.slice_data.actor.Modified()
+        self.slice_data.renderer.ResetCameraClippingRange()
+
+        # Now apply proper fit-to-view scaling with updated bounds
+        # Reposition() will call ResetCamera() internally which will center the view
+        self.Reposition(self.slice_data)
+
+        if not self.nav_status:
+            self.UpdateRender()
 
     def GetCrossPos(self):
         spacing = self.slice_data.actor.GetInput().GetSpacing()
@@ -1597,6 +1794,19 @@ class Viewer(wx.Panel):
         self.OnScrollBar()
         if not self.nav_status:
             self.UpdateRender()
+
+    def OnHighlightMarker(self, marker):
+        """Synchronize slice viewers to the selected marker's position."""
+        if marker is None:
+            return
+
+        if self.orientation != "AXIAL":
+            return
+
+        if not self.nav_status:
+            Publisher.sendMessage(
+                "Set cross focal point", position=[marker.x, marker.y, marker.z, None, None, None]
+            )
 
     def AddActors(self, actors, slice_number):
         "Inserting actors"

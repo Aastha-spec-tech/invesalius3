@@ -22,7 +22,6 @@ import os
 import tempfile
 import time
 from concurrent import futures
-from typing import Optional
 
 import numpy as np
 import wx
@@ -104,6 +103,9 @@ class BaseImageInteractorStyle(vtkInteractorStyleImage):
         self.AddObserver("MiddleButtonPressEvent", self.OnMiddleButtonPressEvent)
         self.AddObserver("MiddleButtonReleaseEvent", self.OnMiddleButtonReleaseEvent)
 
+        self.AddObserver("MouseMoveEvent", self.OnStatusbarMouseMove)
+        self.AddObserver("LeaveEvent", self.OnStatusbarLeave)
+
     def OnPressLeftButton(self, evt, obj):
         self.left_pressed = True
 
@@ -122,6 +124,12 @@ class BaseImageInteractorStyle(vtkInteractorStyleImage):
 
     def OnMiddleButtonReleaseEvent(self, evt, obj):
         self.middle_pressed = False
+
+    def OnStatusbarMouseMove(self, evt, obj):
+        self.viewer.UpdateStatusbarInfo()
+
+    def OnStatusbarLeave(self, evt, obj):
+        Publisher.sendMessage("Clear statusbar image info")
 
     def GetMousePosition(self):
         mx, my = self.viewer.get_vtk_mouse_position()
@@ -316,6 +324,7 @@ class BaseImageEditionInteractorStyle(DefaultInteractorStyle):
         self.edit_mask_pixel(
             self.fill_value, index, cursor.GetPixels(), position, radius, viewer.orientation
         )
+        viewer._flush_buffer = True
 
         try:
             self.after_brush_click()
@@ -357,6 +366,7 @@ class BaseImageEditionInteractorStyle(DefaultInteractorStyle):
             self.edit_mask_pixel(
                 self.fill_value, index, cursor.GetPixels(), position, radius, viewer.orientation
             )
+            viewer._flush_buffer = True
             try:
                 self.after_brush_move()
             except AttributeError:
@@ -760,13 +770,25 @@ class LinearMeasureInteractorStyle(DefaultInteractorStyle):
 
     def SetUp(self):
         Publisher.sendMessage("Toggle toolbar item", _id=self.state_code, value=True)
+        # Set crosshair cursor for better measurement accuracy
+        self.viewer.interactor.SetCursor(wx.Cursor(wx.CURSOR_CROSS))
 
     def CleanUp(self):
         Publisher.sendMessage("Toggle toolbar item", _id=self.state_code, value=False)
         self.picker.PickFromListOff()
         Publisher.sendMessage("Remove incomplete measurements")
+        # Restore default cursor when exiting measurement mode
+        self.viewer.interactor.SetCursor(wx.Cursor(wx.CURSOR_DEFAULT))
 
     def OnInsertMeasurePoint(self, obj, evt):
+        if self._type == const.CURVED_LINEAR:
+            from invesalius.gui.utils import show_warning
+
+            show_warning(
+                _("Curved Ruler"), _("This measurement can only be performed on the 3D surface.")
+            )
+            return
+
         slice_number = self.slice_data.number
         x, y, z = self._get_pos_clicked()
         mx, my = self.GetMousePosition()
@@ -782,6 +804,11 @@ class LinearMeasureInteractorStyle(DefaultInteractorStyle):
                 self.creating = None
                 self.viewer.scroll_enabled = True
             else:
+                prop = self.picker.GetViewProp()
+                polydata = None
+                if prop and hasattr(prop, "GetMapper") and prop.GetMapper():
+                    polydata = prop.GetMapper().GetInput()
+
                 Publisher.sendMessage(
                     "Add measurement point",
                     position=(x, y, z),
@@ -789,6 +816,7 @@ class LinearMeasureInteractorStyle(DefaultInteractorStyle):
                     location=ORIENTATIONS[self.orientation],
                     slice_number=slice_number,
                     radius=self.radius,
+                    polydata=polydata,
                 )
                 n = len(m.points) - 1
                 self.creating = n, m, mr
@@ -801,8 +829,12 @@ class LinearMeasureInteractorStyle(DefaultInteractorStyle):
             self.selected = selected
             self.viewer.scroll_enabled = False
         else:
-            if self.picker.GetViewProp():
-                # renderer = self.viewer.slice_data.renderer
+            prop = self.picker.GetViewProp()
+            if prop:
+                polydata = None
+                if hasattr(prop, "GetMapper") and prop.GetMapper():
+                    polydata = prop.GetMapper().GetInput()
+
                 Publisher.sendMessage(
                     "Add measurement point",
                     position=(x, y, z),
@@ -810,6 +842,7 @@ class LinearMeasureInteractorStyle(DefaultInteractorStyle):
                     location=ORIENTATIONS[self.orientation],
                     slice_number=slice_number,
                     radius=self.radius,
+                    polydata=polydata,
                 )
                 Publisher.sendMessage(
                     "Add measurement point",
@@ -818,12 +851,17 @@ class LinearMeasureInteractorStyle(DefaultInteractorStyle):
                     location=ORIENTATIONS[self.orientation],
                     slice_number=slice_number,
                     radius=self.radius,
+                    polydata=polydata,
                 )
 
-                n, (m, mr) = 1, self.measures.measures[self._ori][slice_number][-1]
-                self.creating = n, m, mr
-                self.viewer.UpdateCanvas()
-                self.viewer.scroll_enabled = False
+                try:
+                    n, (m, mr) = 1, self.measures.measures[self._ori][slice_number][-1]
+                    self.creating = n, m, mr
+                    self.viewer.UpdateCanvas()
+                    self.viewer.scroll_enabled = False
+                except IndexError:
+                    # Failsafe if MeasurementManager failed to append the measure point
+                    self.creating = None
 
     def OnReleaseMeasurePoint(self, obj, evt):
         if self.selected:
@@ -860,14 +898,16 @@ class LinearMeasureInteractorStyle(DefaultInteractorStyle):
             if self._verify_clicked_display(mx, my):
                 self.viewer.interactor.SetCursor(wx.Cursor(wx.CURSOR_HAND))
             else:
-                self.viewer.interactor.SetCursor(wx.Cursor(wx.CURSOR_DEFAULT))
+                # Restore crosshair cursor when not hovering over a point (measurement mode is active)
+                self.viewer.interactor.SetCursor(wx.Cursor(wx.CURSOR_CROSS))
 
     def OnLeaveMeasureInteractor(self, obj, evt):
         if self.creating or self.selected:
-            n, m, mr = self.creating
-            if not mr.IsComplete():
-                Publisher.sendMessage("Remove incomplete measurements")
-            self.creating = None
+            if self.creating:
+                n, m, mr = self.creating
+                if not mr.IsComplete():
+                    Publisher.sendMessage("Remove incomplete measurements")
+                self.creating = None
             self.selected = None
             self.viewer.UpdateCanvas()
             self.viewer.scroll_enabled = True
@@ -914,12 +954,69 @@ class LinearMeasureInteractorStyle(DefaultInteractorStyle):
         return None
 
 
+class CurvedMeasureInteractorStyle(LinearMeasureInteractorStyle):
+    def __init__(self, viewer):
+        super().__init__(viewer)
+        self.state_code = const.STATE_MEASURE_CURVED_LINEAR
+        self._type = const.CURVED_LINEAR
+
+    def _bind_events(self):
+        super()._bind_events()
+        # Bind double-click to finalize multi-point geodesic measurement
+        self.viewer.interactor.Bind(wx.EVT_LEFT_DCLICK, self.OnFinalizeCurved)
+
+    def SetUp(self):
+        super().SetUp()
+        # In 3D view, we want to pick surfaces
+        if self.orientation == "VOLUME":
+            for actor in self.viewer.slice_data.surface_actors:
+                self.picker.AddPickList(self.viewer.slice_data.surface_actors[actor])
+            self.picker.PickFromListOn()
+
+    def CleanUp(self):
+        self.viewer.interactor.Unbind(wx.EVT_LEFT_DCLICK)
+        super().CleanUp()
+
+    def OnFinalizeCurved(self, evt):
+        """Finalize multi-point curved measurement on double-click."""
+        multi = ses.Session().GetConfig("geodesic_multi_point", False)
+        if multi and self.creating:
+            Publisher.sendMessage("Finalize measurement")
+            self.creating = None
+            self.viewer.scroll_enabled = True
+        evt.Skip()
+
+
 class AngularMeasureInteractorStyle(LinearMeasureInteractorStyle):
     def __init__(self, viewer):
         LinearMeasureInteractorStyle.__init__(self, viewer)
         self._type = const.ANGULAR
 
-        self.state_code = const.STATE_MEASURE_ANGLE
+
+class AnnotationInteractorStyle(LinearMeasureInteractorStyle):
+    """
+    Interactor style for placing annotations.
+    """
+
+    def __init__(self, viewer):
+        LinearMeasureInteractorStyle.__init__(self, viewer)
+        self.state_code = const.STATE_MEASURE_ANNOTATION
+        self._type = const.ANNOTATION
+
+    def OnInsertMeasurePoint(self, obj, evt):
+        was_creating = self.creating is not None
+        super().OnInsertMeasurePoint(obj, evt)
+
+        # If it was creating, and now it's not, the rubber-banding finished (second click)
+        if was_creating and self.creating is None:
+            slice_number = self.slice_data.number
+            try:
+                m, mr = self.measures.measures[self._ori][slice_number][-1]
+                Publisher.sendMessage(
+                    "Show annotation dialog", m=m, mr=mr, location=ORIENTATIONS[self.orientation]
+                )
+            except (IndexError, KeyError):
+                pass
 
 
 class DensityMeasureStyle(DefaultInteractorStyle):
@@ -1098,7 +1195,8 @@ class PanMoveInteractorStyle(DefaultInteractorStyle):
         iren = self.viewer.interactor
         mouse_x, mouse_y = iren.GetLastEventPosition()
         ren = iren.FindPokedRenderer(mouse_x, mouse_y)
-        ren.ResetCamera()
+        slice_data = self.viewer.get_slice_data(ren)
+        self.viewer.Reposition(slice_data)
         iren.Render()
 
 
@@ -1176,10 +1274,8 @@ class ZoomInteractorStyle(DefaultInteractorStyle):
     def OnUnZoom(self, evt):
         mouse_x, mouse_y = self.viewer.interactor.GetLastEventPosition()
         ren = self.viewer.interactor.FindPokedRenderer(mouse_x, mouse_y)
-        # slice_data = self.get_slice_data(ren)
-        ren.ResetCamera()
-        ren.ResetCameraClippingRange()
-        # self.Reposition(slice_data)
+        slice_data = self.viewer.get_slice_data(ren)
+        self.viewer.Reposition(slice_data)
         self.viewer.interactor.Render()
 
 
@@ -1204,10 +1300,8 @@ class ZoomSLInteractorStyle(vtkInteractorStyleRubberBandZoom):
     def OnUnZoom(self, evt):
         mouse_x, mouse_y = self.viewer.interactor.GetLastEventPosition()
         ren = self.viewer.interactor.FindPokedRenderer(mouse_x, mouse_y)
-        # slice_data = self.get_slice_data(ren)
-        ren.ResetCamera()
-        ren.ResetCameraClippingRange()
-        # self.Reposition(slice_data)
+        slice_data = self.viewer.get_slice_data(ren)
+        self.viewer.Reposition(slice_data)
         self.viewer.interactor.Render()
 
 
@@ -1406,7 +1500,7 @@ class EditorInteractorStyle(DefaultInteractorStyle):
         viewer.slice_.edit_mask_pixel(
             operation, cursor.GetPixels(), position, radius, viewer.orientation
         )
-        # viewer._flush_buffer = True
+        viewer._flush_buffer = True
 
         # TODO: To create a new function to reload images to viewer.
         viewer.OnScrollBar()
@@ -1453,6 +1547,7 @@ class EditorInteractorStyle(DefaultInteractorStyle):
             viewer.slice_.edit_mask_pixel(
                 operation, cursor.GetPixels(), position, radius, viewer.orientation
             )
+            viewer._flush_buffer = True
 
             viewer.OnScrollBar(update3D=False)
 
@@ -2648,10 +2743,46 @@ class SelectMaskPartsInteractorStyle(DefaultInteractorStyle):
 
         if self.config.mask:
             if dialog_return == wx.OK:
+                # Capture old mask before selection changes, so we can hide its 3D preview
+                old_mask = self.viewer.slice_.current_mask
+
+                if ses.Session().mask_3d_preview:
+                    self.config.mask.imagedata = self.config.mask.as_vtkimagedata()
+                    self.config.mask.create_3d_preview()
+                    # Ensure final colour is set BEFORE any render (fixes color flash)
+                    self.config.mask.volume.set_colour(self.config.mask.colour)
+
                 self.config.mask.name = self.config.mask_name
-                self.viewer.slice_._add_mask_into_proj(self.config.mask)
+                # Avoid triggering an immediate "Show mask" (and thus a render) while adding:
+                self.viewer.slice_._add_mask_into_proj(self.config.mask, show=False)
                 self.viewer.slice_.SelectCurrentMask(self.config.mask.index)
                 Publisher.sendMessage("Change mask selected", index=self.config.mask.index)
+
+                if ses.Session().mask_3d_preview:
+                    # Load new actor FIRST, then remove old one — avoids black-flash frame
+                    Publisher.sendMessage(
+                        "Load mask preview", mask_3d_actor=self.config.mask.volume._actor, flag=True
+                    )
+                    # Safely detach the old mask's 3D preview from the renderer.
+                    # We do not destroy the volume data because the mask is still in the project.
+                    if old_mask is not None and old_mask.volume is not None:
+                        Publisher.sendMessage(
+                            "Remove mask preview", mask_3d_actor=old_mask.volume._actor
+                        )
+
+                # Now that actors are ready, trigger the final visibility and render
+                Publisher.sendMessage("Show mask", index=self.config.mask.index, value=True)
+                Publisher.sendMessage("Render volume viewer")
+            else:
+                if (
+                    ses.Session().mask_3d_preview
+                    and hasattr(self.config.mask, "volume")
+                    and self.config.mask.volume is not None
+                ):
+                    Publisher.sendMessage(
+                        "Remove mask preview", mask_3d_actor=self.config.mask.volume._actor
+                    )
+                    Publisher.sendMessage("Render volume viewer")
 
             del self.viewer.slice_.aux_matrices["SELECT"]
             self.viewer.slice_.to_show_aux = ""
@@ -2701,6 +2832,19 @@ class SelectMaskPartsInteractorStyle(DefaultInteractorStyle):
         self.config.mask.was_edited = True
         Publisher.sendMessage("Reload actual slice")
 
+        # Bug 1 fix: also update the 3D Mask Preview to show selection in red
+        if ses.Session().mask_3d_preview and self.config.mask:
+            if self.config.mask.volume is None:
+                self.config.mask.imagedata = self.config.mask.as_vtkimagedata()
+                self.config.mask.create_3d_preview()
+                self.config.mask.volume.set_colour((1.0, 0.0, 0.0))
+                Publisher.sendMessage(
+                    "Load mask preview", mask_3d_actor=self.config.mask.volume._actor, flag=True
+                )
+            else:
+                self.config.mask._update_imagedata(update_volume_viewer=False)
+            Publisher.sendMessage("Render volume viewer")
+
     def _create_new_mask(self):
         mask = self.viewer.slice_.create_new_mask(show=False, add_to_project=False)
         mask.was_edited = True
@@ -2719,8 +2863,8 @@ class FFillSegmentationConfig(metaclass=utils.Singleton):
         self.con_2d = 4
         self.con_3d = 6
 
-        self.t0: Optional[int] = None
-        self.t1: Optional[int] = None
+        self.t0: int | None = None
+        self.t1: int | None = None
 
         self.fill_value = 254
 
@@ -2979,6 +3123,9 @@ class Styles:
         const.STATE_MEASURE_ANGLE: AngularMeasureInteractorStyle,
         const.STATE_MEASURE_DENSITY_ELLIPSE: DensityMeasureEllipseStyle,
         const.STATE_MEASURE_DENSITY_POLYGON: DensityMeasurePolygonStyle,
+        const.STATE_MEASURE_ANNOTATION: AnnotationInteractorStyle,
+        const.STATE_MEASURE_ANNOTATION: AnnotationInteractorStyle,
+        const.STATE_MEASURE_CURVED_LINEAR: CurvedMeasureInteractorStyle,
         const.STATE_NAVIGATION: NavigationInteractorStyle,
         const.STATE_PAN: PanMoveInteractorStyle,
         const.STATE_SPIN: SpinInteractorStyle,

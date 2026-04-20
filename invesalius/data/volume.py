@@ -164,14 +164,22 @@ class Volume:
             Publisher.sendMessage("Disable volume cut menu")
             Publisher.sendMessage("Unload volume", volume=self.volume)
 
-            del self.image
-            del self.imagedata
-            del self.final_imagedata
-            del self.volume
-            del self.color_transfer
-            del self.opacity_transfer_func
-            del self.volume_properties
-            del self.volume_mapper
+            if hasattr(self, "image"):
+                del self.image
+            if hasattr(self, "imagedata"):
+                del self.imagedata
+            if hasattr(self, "final_imagedata"):
+                del self.final_imagedata
+            if hasattr(self, "volume"):
+                del self.volume
+            if hasattr(self, "color_transfer"):
+                del self.color_transfer
+            if hasattr(self, "opacity_transfer_func"):
+                del self.opacity_transfer_func
+            if hasattr(self, "volume_properties"):
+                del self.volume_properties
+            if hasattr(self, "volume_mapper"):
+                del self.volume_mapper
             self.volume = None
             self.exist = False
             self.loaded_image = False
@@ -230,14 +238,22 @@ class Volume:
             Publisher.sendMessage("Change volume viewer gui colour", colour=colour)
         else:
             Publisher.sendMessage("Unload volume", volume=self.volume)
-            del self.image
-            del self.imagedata
-            del self.final_imagedata
-            del self.volume
-            del self.color_transfer
-            del self.opacity_transfer_func
-            del self.volume_properties
-            del self.volume_mapper
+            if hasattr(self, "image"):
+                del self.image
+            if hasattr(self, "imagedata"):
+                del self.imagedata
+            if hasattr(self, "final_imagedata"):
+                del self.final_imagedata
+            if hasattr(self, "volume"):
+                del self.volume
+            if hasattr(self, "color_transfer"):
+                del self.color_transfer
+            if hasattr(self, "opacity_transfer_func"):
+                del self.opacity_transfer_func
+            if hasattr(self, "volume_properties"):
+                del self.volume_properties
+            if hasattr(self, "volume_mapper"):
+                del self.volume_mapper
             self.volume = None
             self.exist = False
             self.loaded_image = False
@@ -508,7 +524,10 @@ class Volume:
         number_filters = len(self.config["convolutionFilters"])
         if number_filters:
             if not (update_progress):
-                update_progress = vtk_utils.ShowProgress(number_filters)
+                update_progress = vtk_utils.ShowProgress(
+                    number_filters,
+                    msg=_("Rendering volume..."),
+                )
             for filter in self.config["convolutionFilters"]:
                 convolve = vtkImageConvolve()
                 convolve.SetInputData(imagedata)
@@ -555,7 +574,10 @@ class Volume:
         #     flip_image = False
 
         # if (flip_image):
-        update_progress = vtk_utils.ShowProgress(2 + number_filters)
+        update_progress = vtk_utils.ShowProgress(
+            2 + number_filters,
+            msg=_("Rendering volume..."),
+        )
         # Flip original vtkImageData
         flip = vtkImageFlip()
         flip.SetInputData(image)
@@ -649,6 +671,10 @@ class Volume:
         volume = vtkVolume()
         volume.SetMapper(volume_mapper)
         volume.SetProperty(volume_properties)
+
+        # Enable shading for SSAO compatibility (computes normals for volume raycasting)
+        volume.GetProperty().ShadeOn()
+
         self.volume = volume
 
         colour = self.GetBackgroundColour()

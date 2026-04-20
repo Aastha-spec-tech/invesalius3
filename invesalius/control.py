@@ -102,6 +102,11 @@ class Controller:
         Publisher.subscribe(self.OnCancelImport, "Cancel DICOM load")
         Publisher.subscribe(self.OnCancelImportBitmap, "Cancel bitmap load")
 
+        Publisher.subscribe(self.OnShowImportMaskDialog, "Show import mask dialog")
+        Publisher.subscribe(self.OnImportMaskNifti, "Import Nifti mask")
+        Publisher.subscribe(self.OnShowExportMaskDialog, "Show export mask dialog")
+        Publisher.subscribe(self.OnExportMaskNifti, "Export masks to nifti")
+
         Publisher.subscribe(self.OnShowDialogCloseProject, "Close Project")
         Publisher.subscribe(self.OnOpenProject, "Open project")
         Publisher.subscribe(self.OnOpenRecentProject, "Open recent project")
@@ -241,6 +246,144 @@ class Controller:
         filepath = dialog.ShowImportOtherFilesDialog(id_type)
         Publisher.sendMessage("Open other files", filepath=filepath)
 
+    def OnShowImportMaskDialog(self) -> None:
+        # Re-use the existing file dialog for NIfTI with a custom message
+        filepath = dialog.ShowImportOtherFilesDialog(
+            const.ID_NIFTI_IMPORT, msg=_("Import NIfTI Mask")
+        )
+        if filepath:
+            Publisher.sendMessage("Import Nifti mask", filepath=filepath)
+
+    def OnImportMaskNifti(self, filepath: "str | bytes") -> None:
+        try:
+            if isinstance(filepath, bytes):
+                filepath = filepath.decode("utf-8")
+
+            import invesalius.reader.others_reader as oth
+            from invesalius.reader.nifti_utils import check_is_mask, validate_mask_compatibility
+
+            img = oth.ReadOthers(filepath)
+            if img is False:
+                raise Exception(_("Failed to read NIfTI file."))
+
+            # Ensure a volume is loaded before importing a mask
+            if self.Slice.matrix is None:
+                raise ValueError(
+                    _("No volume loaded. Please load a volume before importing a mask.")
+                )
+
+            # Preserve original dtype; avoid forcing float64 conversion
+            data = np.asarray(img.dataobj)
+
+            # Validate dimensions match the current project volume
+            proj_shape = self.Slice.matrix.shape[::-1]
+            validate_mask_compatibility(data.shape, proj_shape)
+
+            # Convert and normalize to binary label map (0/255 uint8)
+            mask_data = check_is_mask(data)
+
+            # Match InVesalius internal (axial) coordinate layout (ZYX flipped)
+            mask_data = np.ascontiguousarray(np.fliplr(np.swapaxes(mask_data, 0, 2)))
+
+            name = os.path.splitext(os.path.basename(filepath))[0]
+            # Label-map threshold: strict 0-255 range for binary mask
+            thresh = (0, 255)
+            colour = const.MASK_COLOUR[len(prj.Project().mask_dict) % len(const.MASK_COLOUR)]
+
+            Publisher.sendMessage("Create new mask", mask_name=name, thresh=thresh, colour=colour)
+
+            mask = self.Slice.current_mask
+            if mask:
+                # Mask matrix has shape (Z+1, Y+1, X+1) with padding at index 0. Re-assign correctly.
+                mask.matrix[1:, 1:, 1:] = mask_data
+                mask.was_edited = True
+                # Trigger full volume re-render for mask overlay
+                mask.modified(all_volume=True)
+                # Discard stale buffers and refresh 2D slice viewers
+                for buffer_ in self.Slice.buffer_slices.values():
+                    buffer_.discard_vtk_mask()
+                    buffer_.discard_mask()
+                Publisher.sendMessage("Reload actual slice")
+
+            Publisher.sendMessage(
+                "Update status text in GUI", label=_("Mask imported successfully.")
+            )
+
+        except Exception as e:
+            dialogs.ErrorMessageBox(None, _("Error importing mask"), str(e)).ShowModal()
+
+    def OnShowExportMaskDialog(self, mask_indexes: list) -> None:
+        if not mask_indexes:
+            return
+
+        project = prj.Project()
+        if len(mask_indexes) == 1:
+            mask = project.GetMask(mask_indexes[0])
+            default_file = f"{mask.name}.nii.gz" if mask else "mask.nii.gz"
+        else:
+            default_file = "masks.nii.gz"
+
+        dlg = wx.FileDialog(
+            None,
+            _("Export Mask as NIfTI"),
+            defaultFile=default_file,
+            wildcard=dialogs.WILDCARD_NIFTI,
+            style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT,
+        )
+
+        if dlg.ShowModal() == wx.ID_OK:
+            filepath = dlg.GetPath()
+            if isinstance(filepath, bytes):
+                filepath = filepath.decode("utf-8")
+
+            if not (filepath.endswith(".nii") or filepath.endswith(".nii.gz")):
+                filepath += ".nii.gz"
+            Publisher.sendMessage(
+                "Export masks to nifti", mask_indexes=mask_indexes, filepath=filepath
+            )
+        dlg.Destroy()
+
+    def OnExportMaskNifti(self, mask_indexes: list, filepath: "str | bytes") -> None:
+        try:
+            import nibabel as nib
+
+            project = prj.Project()
+            for index in mask_indexes:
+                mask = project.GetMask(index)
+                if not mask:
+                    continue
+
+                # Ensure all slices have threshold data (lazy threshold only generates visited slices)
+                self.Slice.do_threshold_to_all_slices(mask)
+                # Strip 1-pixel padding from InVesalius mask matrix (padding is only at index 0)
+                mask_matrix = mask.matrix[1:, 1:, 1:]
+
+                # Axis transform to NIfTI layout and cast to uint8
+                export_data = np.ascontiguousarray(
+                    np.swapaxes(np.fliplr(mask_matrix), 0, 2)
+                ).astype(np.uint8)
+
+                # Label-map enforcement: strict binary encoding (0=background, 255=mask)
+                export_data[export_data > 0] = 255
+
+                # Use identity affine to ensure RAS+ encoding; as_closest_canonical will be a no-op on reimport
+                mask_nifti = nib.Nifti1Image(export_data, np.eye(4))
+                mask_nifti.header.set_zooms(self.Slice.spacing)
+
+                # Save the NIfTI file cleanly without popping a dialog
+                if len(mask_indexes) > 1:
+                    # Append mask name if exporting multiple via loop
+                    base_path = filepath.split(".nii")[0]
+                    ext = ".nii" if filepath.endswith(".nii") else ".nii.gz"
+                    save_path = f"{base_path}_{mask.name}{ext}"
+                else:
+                    save_path = filepath
+
+                nib.save(mask_nifti, save_path)
+
+        except Exception as e:
+            dialogs.ErrorMessageBox(None, _("Error exporting mask"), str(e)).ShowModal()
+
     def ShowDialogOpenProject(self) -> None:
         # Offer to save current project if necessary
         session = ses.Session()
@@ -259,6 +402,15 @@ class Controller:
         # Open project
         filepath = dialog.ShowOpenProjectDialog()
         if filepath:
+            if not filepath.lower().endswith(".inv3"):
+                dlg = dialogs.ErrorMessageBox(
+                    None,
+                    _("Invalid file type"),
+                    _("Please select an InVesalius project file (.inv3)."),
+                )
+                dlg.ShowModal()
+                dlg.Destroy()
+                return
             if session.IsOpen():
                 self.CloseProject()
             self.OpenProject(filepath)
@@ -345,31 +497,105 @@ class Controller:
             dialog.InexistentPath(filepath)
 
     def OpenProject(self, filepath: "str | Path") -> None:
-        Publisher.sendMessage("Begin busy cursor")
+        """
+        Open a .inv3 project file with progress dialog and cancellation support.
+        
+        Args:
+            filepath: Path to the .inv3 project file
+        """
+        from invesalius.gui import dialogs
+        
         path = os.path.abspath(filepath)
 
-        proj = prj.Project()
-        proj.OpenPlistProject(path)
-        proj.SetAcquisitionModality(proj.modality)
-        self.Slice = sl.Slice()
-        self.Slice._open_image_matrix(
-            proj.matrix_filename, tuple(proj.matrix_shape), proj.matrix_dtype
-        )
+        # Show busy cursor during loading (main window)
+        Publisher.sendMessage("Begin busy cursor")
+        
+        # Create progress dialog (modal - cancel button remains clickable)
+        progress_dlg = dialogs.ProjectLoadProgressDialog()
+        
+        try:
+            proj = prj.Project()
+            
+            # Define progress callback
+            def progress_callback(value, message):
+                """Update progress dialog and check for cancellation."""
+                return progress_dlg.Update(value, message)
+            
+            # Load project with progress updates
+            result = proj.OpenPlistProject(path, progress_callback)
+            
+            # Check if loading was cancelled
+            if result is False or progress_dlg.WasCancelled():
+                progress_dlg.Close()
+                
+                # Clean up the partially loaded project
+                proj.Close()
+                
+                # End busy cursor
+                Publisher.sendMessage("End busy cursor")
+                
+                # Show cancellation message
+                wx.MessageBox(
+                    _("Project loading was cancelled."),
+                    _("Load Cancelled"),
+                    wx.OK | wx.ICON_INFORMATION
+                )
+                return
+            
+            # Update progress
+            if not progress_dlg.Update(96, _("Initializing project...")):
+                progress_dlg.Close()
+                proj.Close()
+                Publisher.sendMessage("End busy cursor")
+                return
+            
+            proj.SetAcquisitionModality(proj.modality)
+            self.Slice = sl.Slice()
+            self.Slice._open_image_matrix(
+                proj.matrix_filename, tuple(proj.matrix_shape), proj.matrix_dtype
+            )
 
-        self.Slice.window_level = proj.level
-        self.Slice.window_width = proj.window
-        if proj.affine:
-            self.Slice.affine = np.asarray(proj.affine).reshape(4, 4)
-        else:
-            self.Slice.affine = np.identity(4)
+            self.Slice.window_level = proj.level
+            self.Slice.window_width = proj.window
+            if proj.affine:
+                self.Slice.affine = np.asarray(proj.affine).reshape(4, 4)
+            else:
+                self.Slice.affine = np.identity(4)
 
-        Publisher.sendMessage("Update threshold limits list", threshold_range=proj.threshold_range)
+            Publisher.sendMessage("Update threshold limits list", threshold_range=proj.threshold_range)
 
-        self.LoadProject()
+            # Update progress
+            if not progress_dlg.Update(98, _("Loading project into interface...")):
+                progress_dlg.Close()
+                proj.Close()
+                Publisher.sendMessage("End busy cursor")
+                return
 
-        session = ses.Session()
-        session.OpenProject(filepath)
-        Publisher.sendMessage("Enable state project", state=True)
+            self.LoadProject(end_busy_cursor=False)
+
+            session = ses.Session()
+            session.OpenProject(filepath)
+            Publisher.sendMessage("Enable state project", state=True)
+            
+            # Complete - dialog will auto-hide at 100%
+            progress_dlg.Update(100, _("Project loaded successfully!"))
+            
+            # End busy cursor after successful load
+            Publisher.sendMessage("End busy cursor")
+            
+        except Exception as e:
+            # Handle any errors during loading
+            progress_dlg.Close()
+            Publisher.sendMessage("End busy cursor")
+            wx.MessageBox(
+                _("Error loading project: {}").format(str(e)),
+                _("Load Error"),
+                wx.OK | wx.ICON_ERROR
+            )
+        finally:
+            # Ensure progress dialog is closed
+            if progress_dlg.dlg:
+                progress_dlg.Close()
 
     def OnSaveProject(self, filepath: Optional["str | Path"]) -> None:
         self.SaveProject(filepath)
@@ -528,6 +754,10 @@ class Controller:
         patients_groups = dcm.GetDicomGroups(directory)
         name = directory.rpartition("\\")[-1].split(".")
 
+        # Track whether this is a generic volume import (NIfTI/Analyze/PAR-REC)
+        # so we can skip auto mask creation for those paths.
+        is_other_files = False
+
         if len(patients_groups):
             # OPTION 1: DICOM
             group = dcm.SelectLargerDicomGroup(patients_groups)
@@ -537,6 +767,7 @@ class Controller:
             self.CreateDicomProject(dicom, matrix, matrix_filename)
         else:
             # OPTION 2: NIfTI, Analyze or PAR/REC
+            is_other_files = True
             if name[-1] == "gz":
                 name[1] = "nii.gz"
 
@@ -554,7 +785,7 @@ class Controller:
                 self.CreateOtherProject(str(name[0]), matrix, matrix_filename)
             # OPTION 4: Nothing...
 
-        self.LoadProject()
+        self.LoadProject(create_default_mask=not is_other_files)
         Publisher.sendMessage("Enable state project", state=True)
 
     def OnImportGroup(self, group: "DicomGroup", use_gui: bool):
@@ -599,7 +830,7 @@ class Controller:
 
     # -------------------------------------------------------------------------------------
 
-    def LoadProject(self):
+    def LoadProject(self, create_default_mask=True, end_busy_cursor=True):
         proj = prj.Project()
 
         const.THRESHOLD_OUTVALUE = proj.threshold_range[0]
@@ -640,7 +871,7 @@ class Controller:
             if self.Slice.current_mask is not None:
                 Publisher.sendMessage("Show mask", index=visible_mask_idx, value=True)
                 Publisher.sendMessage("Change mask selected", index=visible_mask_idx)
-        else:
+        elif create_default_mask:
             mask_name = const.MASK_NAME_PATTERN % (1,)
 
             if proj.modality != "UNKNOWN":
@@ -676,7 +907,9 @@ class Controller:
         img_file = Path(outdir) / "proj_image.nii.gz"
         proj.export_project_to_nifti(img_file, save_masks=False)
 
-        Publisher.sendMessage("End busy cursor")
+        # End busy cursor only if it was started (not when using progress dialog)
+        if end_busy_cursor:
+            Publisher.sendMessage("End busy cursor")
         Publisher.sendMessage("Project loaded successfully")
 
     def CreateDicomProject(self, dicom, matrix, matrix_filename):
@@ -961,12 +1194,18 @@ class Controller:
     def OnOpenOtherFiles(self, filepath: bytes) -> None:
         filepath = utils.decode(filepath, const.FS_ENCODE)
         if (filepath) is not None:
+            # Close existing project fully (removes VTK actors, clears masks,
+            # surfaces, measurements via pubsub). Safe on fresh start.
+            session = ses.Session()
+            if session.IsOpen():
+                self.CloseProject()
+
             name = os.path.basename(filepath).split(".")[0]
             group = oth.ReadOthers(filepath)
             if group:
                 matrix, matrix_filename = self.OpenOtherFiles(group)
                 self.CreateOtherProject(name, matrix, matrix_filename)
-                self.LoadProject()
+                self.LoadProject(create_default_mask=False)
 
                 Publisher.sendMessage("Enable state project", state=True)
             else:

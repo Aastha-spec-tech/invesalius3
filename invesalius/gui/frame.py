@@ -41,7 +41,6 @@ import invesalius.gui.preferences as preferences
 #  import invesalius.gui.import_network_panel as imp_net
 import invesalius.project as prj
 import invesalius.session as ses
-import invesalius.utils as utils
 from invesalius import inv_paths
 from invesalius.data.slice_ import Slice
 from invesalius.gui import project_properties
@@ -58,6 +57,8 @@ except ImportError:
 # Layout tools' IDs - this is used only locally, therefore doesn't
 # need to be defined in constants.py
 VIEW_TOOLS = [ID_LAYOUT, ID_TEXT, ID_RULER] = [wx.NewIdRef() for number in range(3)]
+# ID_ORIENTATION_CUBE is defined globally in constants.py because it is used
+# both in the LayoutToolBar and in the MenuBar.
 
 # Custom IDs for our new menu items
 [ID_SHOW_LOG_VIEWER, ID_INTERACTIVE_SHELL] = [wx.NewIdRef() for number in range(2)]
@@ -228,6 +229,19 @@ class Frame(wx.Frame):
                 event.Skip()
                 return
 
+        # Handle Ctrl+Shift+A for clearing mask (should work at any time, even outside edit mode)
+        if (
+            modifiers == (wx.MOD_CONTROL | wx.MOD_SHIFT)
+            and keycode == ord("A")
+            and not is_search_field
+            and not is_shell_focused
+        ):
+            # Only clear mask if a mask is available (menu is enabled)
+            if hasattr(self, "clean_mask_menu") and self.clean_mask_menu.IsEnabled():
+                self.OnCleanMask()
+            event.Skip()
+            return
+
         # If the key is a move marker key, publish a message to move the marker,
         # but only if we're not in a search field or shell
         if (
@@ -274,7 +288,17 @@ class Frame(wx.Frame):
 
         # First, the task panel, to be on the left fo the frame
         # This will be specific according to InVesalius application
-        aui_manager.AddPane(task_panel, wx.aui.AuiPaneInfo().Name("Tasks").CaptionVisible(False))
+        aui_manager.AddPane(
+            task_panel,
+            wx.aui.AuiPaneInfo()
+            .Name("Tasks")
+            .CaptionVisible(False)
+            .Left()
+            .BestSize((385, -1))
+            .MinSize((385, -1))
+            .CloseButton(False)
+            .Layer(0),
+        )
 
         # Then, add the viewers panel, which will contain slices and
         # volume panels. In future this might also be specific
@@ -555,9 +579,49 @@ class Frame(wx.Frame):
             self._last_viewer_orientation_focus = orientation
 
     def CloseProject(self):
+        # The controller's ShowDialogCloseProject already handles the
+        # unsaved-changes dialog when project_status is NEW or CHANGED.
         Publisher.sendMessage("Close Project")
 
     def ExitDialog(self):
+        session = ses.Session()
+
+        # Check for unsaved changes
+        if session.HasUnsavedChanges():
+            msg = _("You have unsaved changes. What would you like to do?")
+            # Use RichMessageDialog so we can add a 'Store session' checkbox,
+            # consistent with the normal (no unsaved changes) exit dialog.
+            dialog = wx.RichMessageDialog(
+                None, msg, "InVesalius 3 - Unsaved Changes", wx.ICON_WARNING | wx.YES_NO | wx.CANCEL
+            )
+            dialog.SetYesNoLabels(_("Save and Exit"), _("Discard and Exit"))
+            dialog.ShowCheckBox(_("Store session"), False)
+
+            def on_close_unsaved(event):
+                dialog.EndModal(wx.ID_CANCEL)
+                event.Skip()
+
+            dialog.Bind(wx.EVT_CLOSE, on_close_unsaved)
+
+            answer = dialog.ShowModal()
+            store = dialog.IsCheckBoxChecked()
+            dialog.Destroy()
+
+            if answer == wx.ID_YES:
+                # Save and exit
+                Publisher.sendMessage("Show save dialog", save_as=session.temp_item)
+                wx.Yield()
+                log.invLogger.closeLogging()
+                return 2 if store else 1  # 2 = keep session, 1 = delete session
+            elif answer == wx.ID_NO:
+                # Discard and exit
+                log.invLogger.closeLogging()
+                return 2 if store else 1
+            else:
+                # Cancel - don't exit
+                return 0
+
+        # No unsaved changes, show normal exit dialog
         msg = _("Are you sure you want to exit?")
         dialog = wx.RichMessageDialog(
             None, msg, "Invesalius 3", wx.ICON_QUESTION | wx.YES_NO | wx.NO_DEFAULT
@@ -607,6 +671,13 @@ class Frame(wx.Frame):
 
             if status == 1:
                 Publisher.sendMessage("Exit session")
+            elif status == 2:
+                # "Store session" — keep state.json so the project is remembered,
+                # but mark it as intentional so the next launch doesn't treat it
+                # as a crash and show the recovery dialog.
+                import invesalius.session as ses
+
+                ses.Session().SetState("stored_session", True)
             self.Destroy()
 
     def OnMenuClick(self, evt):
@@ -843,7 +914,6 @@ class Frame(wx.Frame):
             self.Reposition()
 
     def Reposition(self):
-        Publisher.sendMessage("ProgressBar Reposition")
         self.sizeChanged = False
 
     def OnMove(self, evt):
@@ -867,6 +937,10 @@ class Frame(wx.Frame):
             surface_interpolation = values[const.SURFACE_INTERPOLATION]
             language = values[const.LANGUAGE]
             slice_interpolation = values.get(const.SLICE_INTERPOLATION, 0)
+            landmark_marker_shape = values.get(const.LANDMARK_MARKER_SHAPE, const.MARKER_SHAPE_BALL)
+            fiducial_marker_shape = values.get(
+                const.FIDUCIAL_MARKER_SHAPE, const.MARKER_SHAPE_CROSS
+            )
             file_logging = values.get(const.FILE_LOGGING, 0)
             file_logging_level = values.get(const.FILE_LOGGING_LEVEL, 0)
             append_log_file = values.get(const.APPEND_LOG_FILE, 0)
@@ -880,6 +954,10 @@ class Frame(wx.Frame):
             session.SetConfig("surface_interpolation", surface_interpolation)
             session.SetConfig("language", language)
             session.SetConfig("slice_interpolation", slice_interpolation)
+            ssao_enabled = values.get(const.SSAO_ENABLED, False)
+            session.SetConfig("ssao_enabled", ssao_enabled)
+            session.SetConfig("landmark_marker_shape", landmark_marker_shape)
+            session.SetConfig("fiducial_marker_shape", fiducial_marker_shape)
             session.SetConfig("file_logging", file_logging)
             session.SetConfig("file_logging_level", file_logging_level)
             session.SetConfig("append_log_file", append_log_file)
@@ -897,6 +975,7 @@ class Frame(wx.Frame):
             Publisher.sendMessage("Update Slice Interpolation MenuBar")
             Publisher.sendMessage("Update Navigation Mode MenuBar")
             Publisher.sendMessage("Update Surface Interpolation")
+            Publisher.sendMessage("Update SSAO Preference", enabled=ssao_enabled)
 
     def ShowAbout(self):
         """
@@ -1764,49 +1843,6 @@ class MenuBar(wx.MenuBar):
 # ------------------------------------------------------------------
 # ------------------------------------------------------------------
 # ------------------------------------------------------------------
-
-
-class ProgressBar(wx.Gauge):
-    """
-    Progress bar / gauge.
-    """
-
-    def __init__(self, parent):
-        wx.Gauge.__init__(self, parent, -1, 100)
-        self.parent = parent
-        self._Layout()
-
-        self.__bind_events()
-
-    def __bind_events(self):
-        """
-        Bind events related to pubsub.
-        """
-        sub = Publisher.subscribe
-        sub(self._Layout, "ProgressBar Reposition")
-
-    def _Layout(self):
-        """
-        Compute new size and position, according to parent resize
-        """
-        rect = self.Parent.GetFieldRect(2)
-        self.SetPosition((rect.x + 2, rect.y + 2))
-        self.SetSize((rect.width - 4, rect.height - 4))
-        self.Show()
-
-    def SetPercentage(self, value):
-        """
-        Set value [0;100] into gauge, moving "status" percentage.
-        """
-        self.SetValue(int(value))
-        if value >= 99:
-            self.SetValue(0)
-        self.Refresh()
-        self.Update()
-
-
-# ------------------------------------------------------------------
-# ------------------------------------------------------------------
 # ------------------------------------------------------------------
 
 
@@ -1819,48 +1855,58 @@ class StatusBar(wx.StatusBar):
         wx.StatusBar.__init__(self, parent, -1)
 
         # General status configurations
-        self.SetFieldsCount(3)
-        self.SetStatusWidths([-2, -2, -1])
+        self.SetFieldsCount(1)
         self.SetStatusText(_("Ready"), 0)
-        self.SetStatusText("", 1)
-        self.SetStatusText("", 2)
 
-        # Add gaugee
-        self.progress_bar = ProgressBar(self)
+        # Right-aligned label for image info
+        self.image_info_label = wx.StaticText(self, -1, "")
+        self.Bind(wx.EVT_SIZE, self._OnSize)
 
         self.__bind_events()
+
+    def _OnSize(self, evt):
+        evt.Skip()
+        self._RepositionImageInfo()
+
+    def _RepositionImageInfo(self):
+        rect = self.GetFieldRect(0)
+        label_width, label_height = self.image_info_label.GetTextExtent(
+            self.image_info_label.GetLabel()
+        )
+        if label_width == 0:
+            return
+        label_height = self.image_info_label.GetSize()[1]
+        x = rect.x + rect.width - label_width - 10
+        y = rect.y + (rect.height - label_height) // 2
+        self.image_info_label.SetPosition((x, y))
 
     def __bind_events(self):
         """
         Bind events related to pubsub.
         """
         sub = Publisher.subscribe
-        sub(self._SetProgressValue, "Update status in GUI")
         sub(self._SetProgressLabel, "Update status text in GUI")
-
-    def _SetProgressValue(self, value, label):
-        """
-        Set both percentage value in gauge and text progress label in
-        status.
-        """
-        self.progress_bar.SetPercentage(value)
-        self.SetStatusText(label, 0)
-        if int(value) >= 99:
-            self.SetStatusText("", 0)
-        if sys.platform == "win32":
-            # TODO: temporary fix necessary in the Windows XP 64 Bits
-            # BUG in wxWidgets http://trac.wxwidgets.org/ticket/10896
-            try:
-                # wx.SafeYield()
-                wx.Yield()
-            except wx.PyAssertionError:
-                utils.debug("wx._core.PyAssertionError")
+        sub(self._SetImageInfo, "Update statusbar image info")
+        sub(self._ClearImageInfo, "Clear statusbar image info")
 
     def _SetProgressLabel(self, label):
         """
         Set text progress label.
         """
         self.SetStatusText(label, 0)
+
+    def _SetImageInfo(self, info):
+        """
+        Update image information in the statusbar.
+        """
+        self.image_info_label.SetLabel(info)
+        self._RepositionImageInfo()
+
+    def _ClearImageInfo(self):
+        """
+        Clear image information in the statusbar.
+        """
+        self.image_info_label.SetLabel("")
 
 
 # ------------------------------------------------------------------
@@ -2062,6 +2108,8 @@ class ObjectToolBar(AuiToolBar):
             const.STATE_MEASURE_ANGLE,
             const.STATE_MEASURE_DENSITY_ELLIPSE,
             const.STATE_MEASURE_DENSITY_POLYGON,
+            const.STATE_MEASURE_ANNOTATION,
+            const.STATE_MEASURE_CURVED_LINEAR,
             # const.STATE_ANNOTATE
         ]
         self.__init_items()
@@ -2112,6 +2160,9 @@ class ObjectToolBar(AuiToolBar):
         path = os.path.join(d, "measure_line_original.png")
         BMP_DISTANCE = wx.Bitmap(str(path), wx.BITMAP_TYPE_PNG)
 
+        path = os.path.join(d, "measure_curve_original.png")
+        BMP_CURVED_DISTANCE = wx.Bitmap(str(path), wx.BITMAP_TYPE_PNG)
+
         path = os.path.join(d, "measure_angle_original.png")
         BMP_ANGLE = wx.Bitmap(str(path), wx.BITMAP_TYPE_PNG)
 
@@ -2120,6 +2171,9 @@ class ObjectToolBar(AuiToolBar):
 
         path = os.path.join(d, "measure_density_polygon32px.png")
         BMP_POLYGON = wx.Bitmap(str(path), wx.BITMAP_TYPE_PNG)
+
+        path = os.path.join(d, "tool_annotation_original.png")
+        BMP_ANNOTATION = wx.Bitmap(str(path), wx.BITMAP_TYPE_PNG)
 
         # Create tool items based on bitmaps
         self.AddTool(
@@ -2171,6 +2225,14 @@ class ObjectToolBar(AuiToolBar):
             kind=wx.ITEM_CHECK,
         )
         self.AddTool(
+            const.STATE_MEASURE_CURVED_LINEAR,
+            "",
+            BMP_CURVED_DISTANCE,
+            wx.NullBitmap,
+            short_help_string=_("Measure curved distance on surface"),
+            kind=wx.ITEM_CHECK,
+        )
+        self.AddTool(
             const.STATE_MEASURE_ANGLE,
             "",
             BMP_ANGLE,
@@ -2196,6 +2258,16 @@ class ObjectToolBar(AuiToolBar):
             short_help_string=_("Measure density polygon"),
             kind=wx.ITEM_CHECK,
         )
+
+        self.AddTool(
+            const.STATE_MEASURE_ANNOTATION,
+            "",
+            BMP_ANNOTATION,
+            wx.NullBitmap,
+            short_help_string=_("Add annotation"),
+            kind=wx.ITEM_CHECK,
+        )
+
         # self.AddLabelTool(const.STATE_ANNOTATE,
         #                "",
         #                shortHelp = _("Add annotation"),
@@ -2258,8 +2330,29 @@ class ObjectToolBar(AuiToolBar):
         """
         id = evt.GetId()
         state = self.GetToolToggled(id)
-        if state and ((id == const.STATE_MEASURE_DISTANCE) or (id == const.STATE_MEASURE_ANGLE)):
+
+        if state and (
+            (id == const.STATE_MEASURE_DISTANCE)
+            or (id == const.STATE_MEASURE_ANGLE)
+            or (id == const.STATE_MEASURE_ANNOTATION)
+        ):
             Publisher.sendMessage("Fold measure task")
+
+        if state:
+            if id == const.STATE_MEASURE_CURVED_LINEAR:
+                choices = [_("Two points"), _("Multi-points")]
+                current_multi = ses.Session().GetConfig("geodesic_multi_point", False)
+                dlg = wx.SingleChoiceDialog(
+                    self, _("Select curved measurement mode:"), _("Curved Ruler"), choices
+                )
+                dlg.SetSelection(1 if current_multi else 0)
+                if dlg.ShowModal() == wx.ID_OK:
+                    multi = dlg.GetSelection() == 1
+                    ses.Session().SetConfig("geodesic_multi_point", multi)
+                else:
+                    self.ToggleTool(id, False)
+                    state = False
+                dlg.Destroy()
 
         if state:
             Publisher.sendMessage("Enable style", style=id)
@@ -2471,7 +2564,7 @@ class LayoutToolBar(AuiToolBar):
         self.SetToolBitmapSize(wx.Size(32, 32))
 
         self.parent = parent
-        self.enable_items = [ID_LAYOUT, ID_TEXT, ID_RULER]
+        self.enable_items = [ID_LAYOUT, ID_TEXT, ID_RULER, const.ID_ORIENTATION_CUBE]
         self.__init_items()
         self.__bind_events()
         self.__bind_events_wx()
@@ -2479,6 +2572,7 @@ class LayoutToolBar(AuiToolBar):
         self.ontool_layout = False
         self.ontool_text = True
         self.ontool_ruler = True
+        self.ontool_orientation_cube = False  # hidden by default; click icon to show
 
         self.Realize()
         self.SetStateProjectClose()
@@ -2492,6 +2586,8 @@ class LayoutToolBar(AuiToolBar):
         sub(self._SetLayoutWithTask, "Set layout button data only")
         sub(self._SetLayoutWithoutTask, "Set layout button full")
         sub(self._SendRulerVisibilityStatus, "Send ruler visibility status")
+        sub(self._SendOrientationCubeVisibilityStatus, "Send orientation cube visibility status")
+        sub(self._SetOrientationCubeState, "Set orientation cube state")
 
     def __bind_events_wx(self):
         """
@@ -2526,6 +2622,10 @@ class LayoutToolBar(AuiToolBar):
         p = os.path.join(d, "ruler_original_enabled.png")
         self.BMP_WITH_RULER = wx.Bitmap(str(p), wx.BITMAP_TYPE_PNG)
 
+        # Bitmaps for showing/hiding the orientation cube.
+        p = os.path.join(d, "view_isometric.png")
+        self.BMP_ORIENTATION_CUBE = wx.Bitmap(str(p), wx.BITMAP_TYPE_PNG)
+
         self.AddTool(
             ID_LAYOUT,
             "",
@@ -2549,6 +2649,14 @@ class LayoutToolBar(AuiToolBar):
             wx.NullBitmap,
             wx.ITEM_NORMAL,
             short_help_string=_("Hide ruler"),
+        )
+        self.AddTool(
+            const.ID_ORIENTATION_CUBE,
+            "",
+            self.BMP_ORIENTATION_CUBE,
+            wx.NullBitmap,
+            wx.ITEM_NORMAL,
+            short_help_string=_("Show orientation cube"),
         )
 
     def _EnableState(self, state):
@@ -2588,6 +2696,13 @@ class LayoutToolBar(AuiToolBar):
             self.ToggleText()
         elif id == ID_RULER:
             self.ToggleRulers()
+        elif id == const.ID_ORIENTATION_CUBE:
+            # The cube button is wx.ITEM_NORMAL (not a toggle button), so it
+            # is NOT in VIEW_TOOLS.  Consume the event without Skip() so that
+            # the EVT_TOOL does not propagate up the wx window hierarchy and
+            # get re-dispatched a second time by the AUI manager on macOS.
+            self.ToggleOrientationCube()
+            return  # consume – do NOT call event.Skip()
 
         for item in VIEW_TOOLS:
             state = self.GetToolToggled(item)
@@ -2662,20 +2777,91 @@ class LayoutToolBar(AuiToolBar):
         else:
             self.ShowRulers()
 
+    def ShowOrientationCube(self):
+        """
+        Show the orientation cube in the volume viewer.
+        """
+        # Set state FIRST before any messages fire so that if 'Enable state
+        # project' is re-entrant (via PubSub or wx event), the flag is correct.
+        self.ontool_orientation_cube = True
+        Publisher.sendMessage("Show orientation cube", status=True)
+        self.SetToolShortHelp(
+            const.ID_ORIENTATION_CUBE,
+            _("Hide orientation cube"),
+        )
+        Publisher.sendMessage("Update AUI")
+
+    def HideOrientationCube(self):
+        """
+        Hide the orientation cube in the volume viewer.
+        """
+        # Set state FIRST so any re-entrant calls see the correct flag.
+        self.ontool_orientation_cube = False
+        Publisher.sendMessage("Show orientation cube", status=False)
+        self.SetToolShortHelp(
+            const.ID_ORIENTATION_CUBE,
+            _("Show orientation cube"),
+        )
+        Publisher.sendMessage("Update AUI")
+
+    def ToggleOrientationCube(self):
+        """
+        Toggle orientation cube visibility.
+        """
+        if self.ontool_orientation_cube:
+            self.HideOrientationCube()
+        else:
+            self.ShowOrientationCube()
+
+    def _SendOrientationCubeVisibilityStatus(self):
+        """
+        Called by viewer_volume when it is ready. Sends the current toolbar
+        state so the viewer initialises in the correct visibility state.
+        """
+        Publisher.sendMessage("Show orientation cube", status=self.ontool_orientation_cube)
+
+    def _SetOrientationCubeState(self, status):
+        """
+        Update the internal state and toolbar tooltip to match the given status
+        WITHOUT firing another update message (used by viewer_volume when
+        rejecting a request).
+        """
+        self.ontool_orientation_cube = status
+        self.SetToolShortHelp(
+            const.ID_ORIENTATION_CUBE,
+            _("Hide orientation cube") if status else _("Show orientation cube"),
+        )
+
     def SetStateProjectClose(self):
         """
-        Disable menu items (e.g. text) when project is closed.
+        Disable toolbar items when project is closed.
+        The orientation cube state (ontool_orientation_cube) is intentionally
+        NOT reset here so the user preference survives across project open/close.
         """
         self.ontool_text = True
         self.ontool_ruler = True
         self.ToggleText()
         self.HideRulers()
+        # Just disable the tool button visually; do NOT call HideOrientationCube()
+        # because that would flip ontool_orientation_cube to False, causing the
+        # cube to stay hidden when the next project is opened.
         for tool in self.enable_items:
             self.EnableTool(tool, False)
 
     def SetStateProjectOpen(self):
         """
-        Disable menu items (e.g. text) when project is closed.
+        Enable toolbar items when a project is opened.
+
+        NOTE: We deliberately do NOT call ShowOrientationCube/HideOrientationCube
+        here.  This method is triggered by 'Enable state project' which can fire
+        many times during normal operation (surface load, scan operations, etc.).
+        Calling Show/Hide here caused a race condition: the state flag could still
+        be stale when this fires mid-way through a toggle, causing the cube to
+        appear for a brief moment and then disappear.
+
+        Instead, the cube visibility lifecycle is managed solely by:
+          1. viewer_volume.AddSurface  (auto-shows on first surface)
+          2. LayoutToolBar.ToggleOrientationCube  (user click on icon)
         """
         self.ontool_text = False
         self.ontool_ruler = True

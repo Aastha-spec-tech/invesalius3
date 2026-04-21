@@ -145,8 +145,12 @@ class Preferences(wx.Dialog):
         slice_interpolation = not bool(session.GetConfig("slice_interpolation"))
 
         # Marker shapes (default to ball for both)
-        landmark_marker_shape = session.GetConfig("landmark_marker_shape", const.MARKER_SHAPE_BALL)
-        fiducial_marker_shape = session.GetConfig("fiducial_marker_shape", const.MARKER_SHAPE_CROSS)
+        landmark_marker_shape = session.GetConfig(
+            "landmark_marker_shape", const.MARKER_SHAPE_BALL
+        )
+        fiducial_marker_shape = session.GetConfig(
+            "fiducial_marker_shape", const.MARKER_SHAPE_CROSS
+        )
 
         # SSAO preference
         ssao_enabled = session.GetConfig("ssao_enabled", False)
@@ -173,8 +177,12 @@ class Preferences(wx.Dialog):
             const.LOGFILE: logging_file,
             const.CONSOLE_LOGGING: console_logging,
             const.CONSOLE_LOGGING_LEVEL: console_logging_level,
-            const.MEASURE_TRANSPARENCY_2D: session.GetConfig("measure_transparency_2d", 50),
-            const.MEASURE_TRANSPARENCY_3D: session.GetConfig("measure_transparency_3d", 50),
+            const.MEASURE_TRANSPARENCY_2D: session.GetConfig(
+                "measure_transparency_2d", 50
+            ),
+            const.MEASURE_TRANSPARENCY_3D: session.GetConfig(
+                "measure_transparency_3d", 50
+            ),
             const.SSAO_ENABLED: ssao_enabled,
         }
 
@@ -273,9 +281,13 @@ class VisualizationTab(wx.Panel):
         sl_transp_3d.Bind(wx.EVT_SLIDER, self.OnMeasureTransparency3DSlider)
 
         bsizer_transp.Add(lbl_transp_2d, 0, wx.TOP | wx.LEFT | wx.FIXED_MINSIZE, 10)
-        bsizer_transp.Add(sl_transp_2d, 0, wx.TOP | wx.LEFT | wx.EXPAND | wx.FIXED_MINSIZE, 5)
+        bsizer_transp.Add(
+            sl_transp_2d, 0, wx.TOP | wx.LEFT | wx.EXPAND | wx.FIXED_MINSIZE, 5
+        )
         bsizer_transp.Add(lbl_transp_3d, 0, wx.TOP | wx.LEFT | wx.FIXED_MINSIZE, 10)
-        bsizer_transp.Add(sl_transp_3d, 0, wx.TOP | wx.LEFT | wx.EXPAND | wx.FIXED_MINSIZE, 5)
+        bsizer_transp.Add(
+            sl_transp_3d, 0, wx.TOP | wx.LEFT | wx.EXPAND | wx.FIXED_MINSIZE, 5
+        )
 
         border = wx.BoxSizer(wx.VERTICAL)
         border.Add(bsizer_slices, 0, wx.EXPAND | wx.ALL | wx.FIXED_MINSIZE, 10)
@@ -312,12 +324,16 @@ class VisualizationTab(wx.Panel):
     def OnMeasureTransparency2DSlider(self, event):
         value = self.sl_transp_2d.GetValue()
         self.session.SetConfig("measure_transparency_2d", value)
-        Publisher.sendMessage("Update measurement transparency", transparency=value, location=const.AXIAL)
+        Publisher.sendMessage(
+            "Update measurement transparency", transparency=value, location=const.AXIAL
+        )
 
     def OnMeasureTransparency3DSlider(self, event):
         value = self.sl_transp_3d.GetValue()
         self.session.SetConfig("measure_transparency_3d", value)
-        Publisher.sendMessage("Update measurement transparency", transparency=value, location=const.SURFACE)
+        Publisher.sendMessage(
+            "Update measurement transparency", transparency=value, location=const.SURFACE
+        )
 
     def LoadSelection(self, values):
         rendering = values.get(const.RENDERING, 0)
@@ -650,8 +666,6 @@ class VisualizationTab(wx.Panel):
     def OnSelectColormapRange(self, evt, ctrl, key):
         self.conf["colormap_range_uv"][key] = ctrl.GetValue()
         self.session.SetConfig("mep_configuration", self.conf)
-
-
     def LoadSelection(self, values):
         rendering = values[const.RENDERING]
         surface_interpolation = values[const.SURFACE_INTERPOLATION]
